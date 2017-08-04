@@ -1,59 +1,6 @@
-<html>
- <head>
-  <title> FRISK under construction </title>
-  <style>
-   body 
-   {
-    background-image: url("textures/environment/wood.jpg");
-    background-repeat: repeat;
-    }
-  </style>
-  <script>
-window.onload = function () {
-    var ImageMap = function (map, img) {
-            var n,
-                areas = map.getElementsByTagName('area'),
-                len = areas.length,
-                coords = [],
-                previousWidth = 2861;
-            for (n = 0; n < len; n++) {
-                coords[n] = areas[n].coords.split(',');
-            }
-            this.resize = function () {
-                var n, m, clen,
-                    x = img.offsetWidth / previousWidth;
-                for (n = 0; n < len; n++) {
-                    clen = coords[n].length;
-                    for (m = 0; m < clen; m++) {
-                        coords[n][m] *= x;
-                    }
-                    areas[n].coords = coords[n].join(',');
-                }
-                previousWidth = document.body.clientWidth;
-                return true;
-            };
-            window.onresize = this.resize;
-        },
-        imageMap = new ImageMap(document.getElementById('map'), document.getElementById('board'));
-    imageMap.resize();
-    return;
-}
+<img src="[map_full] (imported)" width="2861" height="4695" border="0" usemap="#map" />
 
-  </script>
- </head>
- <body>
- <audio controls>
-  <source src="sounds/battle.ogg" type="audio/ogg"> 
-Your browser does not support the audio element.
-</audio> 
-
- 
-
-
-<img src="textures/map_full.jpg"  width="70%" border="0" usemap="#map" id="board">
- 
-
-<map name="map" id="map">
+<map name="map">
 <!-- #$-:Image map file created by GIMP Image Map plug-in -->
 <!-- #$-:GIMP Image Map plug-in by Maurits Rijk -->
 <!-- #$-:Please do not edit lines starting with "#$" -->
@@ -87,41 +34,3 @@ Your browser does not support the audio element.
 <area shape="poly" coords="2281,497,2320,523,2390,526,2418,572,2466,597,2649,702,2608,774,2636,813,2604,837,2618,865,2607,884,2579,880,2545,912,2546,937,2595,934,2597,988,2558,1017,2558,1041,2572,1061,2558,1089,2514,1113,2524,1131,2499,1162,2513,1197,2561,1217,2560,1268,2549,1291,2502,1306,2469,1277,2434,1264,2361,1255,2335,1233,2304,1202,2339,1127,2344,1104,2304,1068,2298,1006,2284,980,2308,922,2287,887,2325,861,2319,805,2339,755,2281,719,2216,682,2239,641,2224,604,2202,582,2223,531" alt="Esgaroth" href="Esgaroth" />
 <area shape="poly" coords="2666,659,2746,683,2854,683,2858,1675,2781,1672,2736,1640,2701,1633,2672,1583,2679,1496,2625,1467,2621,1413,2588,1376,2567,1357,2565,1299,2557,1279,2565,1231,2558,1200,2520,1184,2507,1165,2528,1132,2527,1115,2567,1085,2583,1057,2564,1030,2569,1017,2606,988,2600,932,2552,934,2548,916,2567,897,2586,886,2616,884,2625,859,2609,841,2643,811,2622,783,2616,774" alt="South Rhun" href="South Rhun" />
 </map>
-
-
-<!-- Our Cards -->
-<div>
-<table width=300>
- <tr><td width=300>&nbsp;</td></tr>
-</table>
-<img src="textures/cards/back1.png"> 
-     <img src="textures/cards/back1.png"> 
-     <img src="textures/cards/back1.png"> 
-<img src="textures/cards/back2.png"> 
-<img src="textures/cards/back2.png"> 
-<img src="textures/cards/back2.png">
-<img src="textures/cards/back2.png">
-</div>
-
-
-
-<!-- Our Soldiers -->
-<div style="float: left; position: absolute; left: 200px; top: 100px;" > 
-  <img src="textures/yellow_horse.png"> 
-</div> 
-<div style="float: left; position: absolute; left: 300px; top: 140px;" > 
-  <img src="textures/yellow_horse.png"> 
-</div>
-
-<!-- Black -->
-<div style="float: left; position: absolute; left: 700px; top: 100px;" > 
-  <img src="textures/black_horse.png"> 
-</div> 
-<div style="float: left; position: absolute; left: 750px; top: 100px;" > 
-  <img src="textures/black_horse.png"> 
-</div>
-
-
- </body>
-</html>
-
