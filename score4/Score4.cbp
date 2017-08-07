@@ -49,6 +49,10 @@
 			<Add library="../../Hashmap/libHashmap.a" />
 			<Add library="../../InputParser/libInputParser_C.a" />
 		</Linker>
+		<Unit filename="engine.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="engine.h" />
 		<Unit filename="score4.c">
 			<Option compilerVar="CC" />
 		</Unit>
