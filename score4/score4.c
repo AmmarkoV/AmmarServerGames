@@ -79,21 +79,31 @@ void * waitForGameToStart(struct AmmServer_DynamicRequest  * rqst)
         ( _GET(default_server,rqst,"g",tableID,128) )
      )
   {
+    unsigned int gameID=atoi(tableID);
+
+    playerJoinedGame(games, playerID , gameID);
+
     rqst->content[0]=0;
     char buf[256];
-    snprintf(buf,256,"view.html?p=%s&g=%s&t=%u",playerID,tableID,rand()%10000);
     strcat(rqst->content,"<html>\n");
     strcat(rqst->content,"<head>\n");
     strcat(rqst->content,"<meta http-equiv=\"refresh\" content=\"5; url=");
+    snprintf(buf,256,"view.html?p=%s&g=%s&t=%u",playerID,tableID,rand()%10000);
     strcat(rqst->content,buf);
     strcat(rqst->content,"\"></head><body>\n");
     strcat(rqst->content,"Waiting for Game to Start\n");
+
+
+    snprintf(buf,256,"<br> %u players joined<br>",games[gameID].playersJoined);
+    strcat(rqst->content,buf);
+
     strcat(rqst->content,"</body>\n</html>\n");
     rqst->contentSize=strlen(rqst->content);
   } else
   {
     pleaseLogin(rqst);
   }
+ return 0;
 }
 
 void * find_game_callback(struct AmmServer_DynamicRequest  * rqst)
@@ -136,6 +146,8 @@ void * find_game_callback(struct AmmServer_DynamicRequest  * rqst)
    {
      pleaseLogin(rqst);
    }
+
+ return 0;
 }
 
 
@@ -157,6 +169,7 @@ void * prepare_game_callback(struct AmmServer_DynamicRequest  * rqst)
   if ( _GET(default_server,rqst,"g",tableID,128) )
      {
      }
+  return 0;
 }
 
 //This function prepares the content of  stats context , ( stats.content )
@@ -210,7 +223,7 @@ void * prepare_view_content_callback(struct AmmServer_DynamicRequest  * rqst)
           if ( games[id].board[i]==1 ) { snprintf(buf,4096,"      <img src=\"textures/circle.png\" width=90>\n",i); } else
           if ( games[id].board[i]==2 ) { snprintf(buf,4096,"      <img src=\"textures/x.png\" width=90>\n",i);      } else
                                        {
-                                         snprintf(buf,4096,"      <a href=\"makeMove.html?s=%u&t=%02d-%02d-%02d_%02d:%02d:%02d\"><img src=\"textures/empty.png\" width=90></a>\n",i,
+                                         snprintf(buf,4096,"      <a href=\"makeMove.html?p=%s&g=%s&s=%u&t=%02d-%02d-%02d_%02d:%02d:%02d\"><img src=\"textures/empty.png\" width=90></a>\n",playerID,tableID,i,
                                          tm.tm_mday, tm.tm_mon + 1, tm.tm_year + 1900,   tm.tm_hour, tm.tm_min, tm.tm_sec);
                                        }
 
@@ -249,23 +262,42 @@ void * prepare_move_content_callback(struct AmmServer_DynamicRequest  * rqst)
   unsigned int id=0;
   char moveRequested[128]={0};
   unsigned int move=1000000;
-  if ( _GET(default_server,rqst,"s",moveRequested,128) )
+
+
+
+  char playerID[128]={0};
+  char tableID[128]={0};
+  unsigned int gameID;
+
+  if (
+        ( _GET(default_server,rqst,"p",playerID,128) ) &&
+        ( _GET(default_server,rqst,"g",tableID,128) )
+     )
+  {
+   gameID=atoi(tableID);
+
+   if (isItTurnOfPlayerToMakeMove(games, playerID, gameID) )
+   {
+    if ( _GET(default_server,rqst,"s",moveRequested,128) )
      {
       fprintf(stderr,"Requested move %s for player %u\n",moveRequested,games[id].activePlayer);
       move=atoi(moveRequested);
+
+
+      if (move<games[id].width*games[id].height)
+      {
+        if (games[id].board[move]==0)
+         {
+           games[id].board[move]=games[id].activePlayer;
+
+           if (games[id].activePlayer==1) { games[id].activePlayer=2; } else
+           if (games[id].activePlayer==2) { games[id].activePlayer=1; }
+         }
+      }
      }
-
-   if (move<games[id].width*games[id].height)
-   {
-    if (games[id].board[move]==0)
-    {
-     games[id].board[move]=games[id].activePlayer;
-
-     if (games[id].activePlayer==1) { games[id].activePlayer=2; } else
-     if (games[id].activePlayer==2) { games[id].activePlayer=1; }
-    }
    }
-   return prepare_view_content_callback(rqst);
+  }
+  return prepare_view_content_callback(rqst);
 }
 
 
