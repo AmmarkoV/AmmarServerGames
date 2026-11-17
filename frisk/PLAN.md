@@ -6,7 +6,9 @@ AmmarServer service in C with a dependency-free HTML/JS client.
 Status: **M1 (Phase A), M2 (Phase D), M3 (Phase F engine half), M4 (Phases B/C), M5
 (playable lobby + board + browser client), M6 (async comfort), M7 (leaders, strongholds, sites,
 adventure cards), M8 (chat, clips, taunts, housekeeping) and M9 (hardening, load test, README)
-implemented.** The default data pack is the owner's RISK: The Lord of the Rings board with PLAN.md's rules.
+implemented.** Post-M9 polish (2026-11-17): 7.6 finished-game history/unloading, 8.4 faction pick,
+8.5 last-action highlight + double-tap zoom, 8.7 dice animation and 8.12 end-of-game banner.
+The default data pack is the owner's RISK: The Lord of the Rings board with PLAN.md's rules.
 Tick the boxes as steps land; deviations from a step are recorded inline.
 
 ---
@@ -411,9 +413,15 @@ suite (10,000 legal games plus arbitrary actions) passes with adventure card con
 - [x] **7.5 Startup load**: scan `db/frisk/games/`, load all, rebuild in-memory index, next-id counter =
   max id + 1. A stray `.tmp` is deleted. A corrupt file is renamed `*.corrupt` and logged, startup continues.
   **Implemented** in `games_init`/`load_games`.
-- [ ] **7.6 Finished games**: kept on disk and listed in profile history; unloaded from RAM after 24 h.
-  **Partial:** finished games are kept on disk and listed in the lobby, but are not unloaded after 24 h and
-  profile history is a stats summary rather than a per-game list.
+- [x] **7.6 Finished games**: kept on disk and listed in profile history; unloaded from RAM after 24 h.
+  **Implemented (2026-11-17):** the end-of-game hook appends one JSON line per game to
+  `db/frisk/history.log` (id, name, map, finish time, turns, winner, per-player result and battle stats);
+  `/api/profile` returns the user's last 20 entries and the lobby Account panel lists them. Finished games
+  are freed from their RAM slot 24 h after their last save (`FRISK_FINISHED_TTL_SECONDS` overrides this for
+  tests) by a sweep on lobby polls and game creation; stale finished games are not loaded at startup, and
+  older finished games without a history line are backfilled once at load. Files and logs stay on disk; an
+  unloaded game is no longer openable by URL. This also stops finished games from filling the 64 slots.
+  `tests/history_test.py` covers it.
 - [x] **7.7 Chat persistence**: append-only `chat/<room>.log`, one JSON line per message. **Implemented**
   in M8 as `{id, t, user, kind:"text|clip|taunt|system", ...}` (text is `text`, clips carry `file/dur/size`,
   taunts carry `index`); the in-memory last-id cache is rebuilt by scanning the file when a room is first
@@ -448,16 +456,19 @@ No frameworks, no build step. ES modules, one CSS file. All user-supplied string
   `/api/lobby?since=V` every 5 s (30 s when the tab is hidden, via `visibilitychange`).
   **Implemented**, including the lobby chat panel (M8); invites and the profile editor are inline panels.
 - [ ] **8.4 Pre-game room**: seats, faction/colour pick, ready state, host *Start* (needs ≥ 2), leave.
-  **Partial:** seats, host Start (disabled below two players) and leave are implemented. Faction choice at
-  join and an explicit ready state are deferred; the server assigns the first free faction.
+  **Partial:** seats, host Start (disabled below two players), leave and faction choice are implemented.
+  The room lists the pack's factions; a visitor joins as a free faction, and a seated player switches by
+  posting `faction` to `/api/game/join` again (no new endpoint; taken factions return `faction`/409). The
+  lobby's quick Join still takes the first free faction. An explicit ready state is still deferred.
 - [x] **8.5 Map renderer `map.js`**: fetch `board.svg`, inline it, attach one click/tap handler per `#t<N>`;
   fill = owner colour (with a pattern overlay per faction so colour-blind players can tell them apart);
   army counter badge at `label`; leader / stronghold / site glyphs; sea-link lines; highlight classes
   `selectable`, `source`, `target`, `lastAction`. Pan + zoom: wheel/drag on desktop, pinch/drag on touch
   (pointer events, CSS transform on a wrapper `<g>`), double-tap to zoom to territory, *fit* button.
   **Implemented** in `app.js` with dynamic board dimensions from `map.json`, pointer pan/pinch/wheel zoom,
-  fit, owner fills, badges, leader/stronghold/site markers and the selectable/source/target classes. Deferred:
-  per-faction pattern overlays, double-tap zoom and a `lastAction` highlight.
+  fit, owner fills, badges, leader/stronghold/site markers and the selectable/source/target classes. The
+  per-faction pattern overlays landed in M9; double-tap/double-click zoom to a territory and a dashed
+  `last-action` highlight on the latest spatial log event landed on 2026-11-17.
 - [x] **8.6 Turn UI `game.js`**: a small client state machine mirroring the server phase; legal targets come
   from the server (`state.legal`, produced by `game_legal_actions()`), so the client never re-implements rules.
   - Reinforce: breakdown tooltip, tap territory → stepper (+1/+5/all), *Trade cards* shortcut, *Done*.
@@ -467,13 +478,17 @@ No frameworks, no build step. ES modules, one CSS file. All user-supplied string
   - Confirmation only for irreversible, non-obvious actions (resign, end turn with unplaced armies).
   **Implemented** for setup claim/place/leaders, reinforce (1/5/all buttons plus trade shortcut and Done),
   attack (dice chooser and blitz), conquest move, fortify, end turn and resign. Buttons replace the planned
-  steppers/sliders; moving a leader with armies is not exposed yet; the attack dice are shown from the server
-  event log rather than animated (see 8.7). Resign is confirmed and lives in the game header.
-- [ ] **8.7 Dice `dice.js`**: CSS 3D or sprite roll ~600 ms with `dice_1.wav`, then show server results,
+  steppers/sliders; moving a leader with armies is exposed as a *Bring the leader* toggle on conquest moves and
+  fortifies; attack dice are animated (see 8.7). Resign is confirmed and lives in the game header.
+- [x] **8.7 Dice `dice.js`**: CSS 3D or sprite roll ~600 ms with `dice_1.wav`, then show server results,
   modifiers as `+1` chips, paired comparison lines, casualty counters. Skippable; user setting to disable
   animation/sound (stored in `localStorage`).
-  **Partial:** the event log renders the server's attacker/defender dice and losses as die glyphs; the roll
-  animation, sound and animation setting are deferred.
+  **Implemented (2026-11-17)** in `app.js` rather than a separate `dice.js`: a map overlay shows every new
+  attack seen by polling (your own and other players'; older rolls belong to the replay). CSS pip dice
+  tumble for 600 ms with `dice_1.wav`, then show the server's final roll with `+N` bonus chips. Compared
+  pairs get won/lost rings, unpaired dice are dimmed, and the casualty line totals blitz rounds and notes a
+  conquest. Click dismisses; it auto-hides after 3–4.5 s. *Animate dice* and *Sound effects* checkboxes in
+  the Account panel are stored in `localStorage`; `prefers-reduced-motion` skips the tumble.
 - [x] **8.8 Polling**: `/api/game/state?g=&since=V` — 1 s when it is someone else's turn and the tab is
   visible, 4 s on your own turn (nothing changes except chat), 20 s when hidden. Responses carry `chatN` so the
   chat tail is fetched only when it moved. Tab title becomes `(!) Your turn — Frisk`; optional
@@ -498,7 +513,11 @@ No frameworks, no build step. ES modules, one CSS file. All user-supplied string
     large (≥ 44 px) buttons; *Players / Log / Chat / Cards* as slide-up sheets with unread badges.
   - `meta viewport`, `touch-action: none` on the map only, safe-area insets, no hover-only affordances,
     landscape + portrait both usable. Dark wood theme reusing `textures/environment/wood.jpg`.
-- [ ] **8.12 End of game**: winner banner (`win.wav` / `lost.wav`), final stats table, *Back to lobby*.
+- [x] **8.12 End of game**: winner banner (`win.wav` / `lost.wav`), final stats table, *Back to lobby*.
+  **Implemented (2026-11-17):** a Victory/Defeat/Game-over banner over the map with a per-player table
+  (lands, taken, killed, lost, missions; winner first), *Back to lobby* and *View the board*. The sound
+  plays once when the finish is seen live or on first return after an unseen finish, and waits for the
+  replay to end.
 - [ ] **8.13 Offline-asset audit**: `grep -rE "https?://" res/` returns nothing but comments.
 - [ ] **8.14 Replace old prototypes**: `frisk/board.html` and `frisk/res/board.html` are superseded by
   `res/index.html`; delete them (and `res/textures/map_full.map`) once the new client renders the map.

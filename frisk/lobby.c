@@ -60,7 +60,9 @@ static void write_game_summary(struct FriskJson *json,
 static void game_error(struct AmmServer_DynamicRequest *rqst,
                        const char *reason)
 {
-    if (strstr(reason, "full") != NULL) {
+    if (strstr(reason, "faction") != NULL) {
+        frisk_json_error(rqst, 409, "faction");
+    } else if (strstr(reason, "full") != NULL) {
         frisk_json_error(rqst, 409, "full");
     } else if (strstr(reason, "password") != NULL) {
         frisk_json_error(rqst, 403, "password");
@@ -105,6 +107,7 @@ void *lobby_list_callback(struct AmmServer_DynamicRequest *rqst)
         pthread_mutex_unlock(&friskLock);
         return 0;
     }
+    games_unload_finished();
     if (since != 0 && since == (unsigned int)games_lobby_version()) {
         frisk_json_begin(&json, rqst);
         frisk_json_key_int(&json, "ok", 1);
@@ -244,6 +247,7 @@ void *lobby_join_callback(struct AmmServer_DynamicRequest *rqst)
     unsigned int id = 0;
     unsigned int faction = 0;
     int seat = -1;
+    int was_seated;
     struct FriskGame *game;
     char error[256];
     struct FriskJson json;
@@ -282,6 +286,7 @@ void *lobby_join_callback(struct AmmServer_DynamicRequest *rqst)
         pthread_mutex_unlock(&friskLock);
         return 0;
     }
+    was_seated = game_find_seat(&game->game, username) >= 0;
     if (!games_join(game, username,
                     _POSTexists(rqst, "faction") ? (int)faction : -1,
                     password, &seat, error, sizeof(error))) {
@@ -289,7 +294,7 @@ void *lobby_join_callback(struct AmmServer_DynamicRequest *rqst)
         pthread_mutex_unlock(&friskLock);
         return 0;
     }
-    {
+    if (!was_seated) {
         char message[128];
         snprintf(message, sizeof(message), "%s joined the game", username);
         chat_system_game(game, message);

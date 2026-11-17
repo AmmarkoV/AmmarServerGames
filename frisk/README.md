@@ -27,6 +27,7 @@ shared account database are relative paths:
 | `FRISK_USERS_DB` | `db/users.db` | shared AmmarServer account database |
 | `FRISK_CLIPS_DIR` | `res/uploads/clips` | voice clips |
 | `FRISK_CLIP_CAP_MB` | `256` | housekeeping cap; `0` disables the cap |
+| `FRISK_FINISHED_TTL_SECONDS` | `86400` | how long a finished game stays loaded after its last save |
 
 Open `http://<host>:8090/`.  The client is dependency-free; no CDN or build step
 is involved.
@@ -50,6 +51,7 @@ The canonical durable data is:
 
 - `db/frisk/games/game_<id>.json` — current game state (bounded event ring)
 - `db/frisk/games/game_<id>.log` — append-only JSONL event history
+- `db/frisk/history.log` — one JSON line per finished game (profile history)
 - `db/frisk/chat/<room>.log` — lobby and game chat
 - `res/uploads/clips/<token>.<ext>` — voice clips
 - `db/frisk/profiles.db`, `invites.db`, `remembers.db` — account-side FRISK data
@@ -87,8 +89,9 @@ self-signed-certificate startup command.
 src/AmmarServerGames/run_tests.sh
 ```
 
-This runs the engine/unit/fuzz suite, the HTTP smoke test and the authorization
-audit.  Additional longer checks:
+This runs the engine/unit/fuzz suite, the HTTP smoke test, the authorization
+audit and `tests/history_test.py` (finished-game history, unloading and faction
+switching).  Additional longer checks:
 
 ```sh
 cd src/AmmarServerGames/frisk

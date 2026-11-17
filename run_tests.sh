@@ -33,9 +33,11 @@ run_suite frisk "$HERE/frisk/tests/run_tests.sh"
 if [ -x "$HERE/frisk/frisk" ]; then
     run_suite "frisk HTTP smoke" "$HERE/frisk/tests/http_smoke.sh"
     run_suite "frisk authorization audit" "$HERE/frisk/tests/auth_audit.py"
+    run_suite "frisk history and factions" "$HERE/frisk/tests/history_test.py"
 else
     echo "SKIP: frisk HTTP smoke (server not built)"
     echo "SKIP: frisk authorization audit (server not built)"
+    echo "SKIP: frisk history and factions (server not built)"
 fi
 # score4 has no automated test suite yet; add it here when it does.
 

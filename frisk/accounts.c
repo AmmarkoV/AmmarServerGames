@@ -14,6 +14,7 @@
 #include "../../UserAccounts/userAccountsWeb.h"
 #include "engine/rules.h"
 #include "frisk.h"
+#include "games.h"
 #include "http.h"
 #include "store.h"
 
@@ -1429,6 +1430,18 @@ void *accounts_profile_callback(struct AmmServer_DynamicRequest *rqst)
     frisk_json_key_object(&json, "profile");
     write_profile_json(&json, profile);
     frisk_json_object_end(&json);
+    {
+        char *history = NULL;
+        size_t history_size = 0;
+
+        frisk_json_key_array(&json, "history");
+        if (games_history_for(requested, 20, &history, &history_size) == 0 &&
+            history != NULL && history_size > 0) {
+            frisk_json_value_raw(&json, history);
+        }
+        frisk_json_array_end(&json);
+        free(history);
+    }
     frisk_json_end(&json);
     pthread_mutex_unlock(&friskLock);
     return 0;

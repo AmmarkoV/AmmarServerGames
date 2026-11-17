@@ -188,7 +188,7 @@ static int init_dynamic_content(void)
                               16 * 1024, &accounts_invite_revoke_callback,
                               DIFFERENT_PAGE_FOR_EACH_CLIENT |
                               ENABLE_RECEIVING_FILES);
-    addSessionResourceHandler(&profile_context, "/api/profile", 32 * 1024,
+    addSessionResourceHandler(&profile_context, "/api/profile", 128 * 1024,
                               &accounts_profile_callback,
                               DIFFERENT_PAGE_FOR_EACH_CLIENT);
     addSessionResourceHandler(&profile_set_context, "/api/profile/set",

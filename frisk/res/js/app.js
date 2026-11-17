@@ -115,11 +115,254 @@ const music = {
 
 try {
   if (localStorage.getItem("friskMusic") === "off") music.enabled = false;
-  const savedVolume = Number(localStorage.getItem("friskMusicVolume"));
+  const storedVolume = localStorage.getItem("friskMusicVolume");
+  const savedVolume = storedVolume === null ? NaN : Number(storedVolume);
   if (Number.isFinite(savedVolume) && savedVolume >= 0 && savedVolume <= 1) {
     music.volume = savedVolume;
   }
 } catch (error) { /* storage unavailable */ }
+
+/* ---------------------------------------------------------------- */
+/* Dice, end-of-game banner and sound effects (PLAN.md 8.7, 8.12)    */
+/* ---------------------------------------------------------------- */
+
+const fx = {
+  anim: true,
+  sound: true,
+  diceGame: null,
+  diceVersion: 0,
+  diceTimers: [],
+  endDismissed: false,
+  endSound: false,
+  lastTap: null
+};
+
+try {
+  fx.anim = localStorage.getItem("friskDiceAnim") !== "off";
+  fx.sound = localStorage.getItem("friskSfx") !== "off";
+} catch (error) { /* storage unavailable */ }
+
+function reducedMotion() {
+  return typeof matchMedia === "function" &&
+    matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function playEffect(file) {
+  if (!fx.sound) return;
+  try {
+    const audio = new Audio(`/sounds/${file}`);
+    audio.volume = 0.8;
+    const playing = audio.play();
+    if (playing) playing.catch(() => { /* autoplay blocked */ });
+  } catch (error) { /* audio unavailable */ }
+}
+
+const PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
+
+function makeDie(side) {
+  const die = document.createElement("span");
+  die.className = `die ${side}`;
+  for (let i = 0; i < 9; i++) {
+    const pip = document.createElement("i");
+    die.append(pip);
+  }
+  return die;
+}
+
+function setDieFace(die, value) {
+  const on = PIPS[value] || [];
+  [...die.children].forEach((pip, i) => pip.classList.toggle("on", on.includes(i)));
+  die.setAttribute("aria-label", `${value}`);
+}
+
+function hideDice() {
+  fx.diceTimers.forEach((timer) => clearTimeout(timer));
+  fx.diceTimers = [];
+  const overlay = $("dice-overlay");
+  if (overlay) overlay.classList.add("hidden");
+}
+
+function maybeShowDice(game) {
+  const attacks = (game.log || []).filter((event) =>
+    event.kind === "attack" && event.battles && event.battles.length);
+  const latest = attacks.length ? attacks[attacks.length - 1].version : 0;
+  if (fx.diceGame !== game.id) {
+    /* First load of this game: older rolls belong to the replay, not here. */
+    fx.diceGame = game.id;
+    fx.diceVersion = latest;
+    return;
+  }
+  if (latest <= fx.diceVersion) return;
+  fx.diceVersion = latest;
+  if (!state.replayActive) showDice(attacks[attacks.length - 1]);
+}
+
+function showDice(event) {
+  hideDice();
+  const overlay = $("dice-overlay");
+  const battles = event.battles;
+  const battle = battles[battles.length - 1];
+  const cap = state.mapMeta && state.mapMeta.rules && Number.isInteger(state.mapMeta.rules.dieCap)
+    ? state.mapMeta.rules.dieCap : 6;
+  overlay.replaceChildren();
+
+  const title = document.createElement("div");
+  title.className = "dice-title";
+  title.textContent = `${playerName(event.player)} attacks ${mapName(event.to)} from ${mapName(event.from)}`;
+  overlay.append(title);
+
+  const rows = [];
+  const makeRow = (label, side, values, bonus) => {
+    const row = document.createElement("div");
+    row.className = "dice-row";
+    const name = document.createElement("span");
+    name.className = "dice-label";
+    name.textContent = label;
+    row.append(name);
+    const dice = values.map((value) => {
+      const die = makeDie(side);
+      setDieFace(die, value);
+      row.append(die);
+      return die;
+    });
+    if (bonus) {
+      const chip = document.createElement("span");
+      chip.className = "dice-chip";
+      chip.textContent = `+${bonus}`;
+      chip.title = "Leader, stronghold or card bonus on the highest die";
+      dice[0].after(chip);
+    }
+    overlay.append(row);
+    rows.push({ dice, values });
+    return dice;
+  };
+  /* After a conquest the territory already belongs to the attacker, so the
+   * defender's name is only known while they still hold it. */
+  const owner = state.game && state.game.territories[event.to] ? state.game.territories[event.to].owner : -1;
+  const attackerDice = makeRow(playerName(event.player), "attacker", battle.attacker || [], battle.attackerBonus);
+  const defenderDice = makeRow(owner >= 0 && owner !== event.player ? playerName(owner) : "Defender",
+    "defender", battle.defender || [], battle.defenderBonus);
+
+  const pairs = Math.min(attackerDice.length, defenderDice.length);
+  const outcome = [];
+  for (let i = 0; i < pairs; i++) {
+    const clamp = (value) => (cap > 0 ? Math.min(cap, value) : value);
+    const a = clamp(battle.attacker[i] + (i === 0 ? battle.attackerBonus || 0 : 0));
+    const d = clamp(battle.defender[i] + (i === 0 ? battle.defenderBonus || 0 : 0));
+    outcome.push(a > d);
+  }
+
+  const result = document.createElement("div");
+  result.className = "dice-result";
+  const totalA = battles.reduce((sum, b) => sum + (b.attackerLosses || 0), 0);
+  const totalD = battles.reduce((sum, b) => sum + (b.defenderLosses || 0), 0);
+  let text = `Attacker −${battle.attackerLosses} · Defender −${battle.defenderLosses}`;
+  if (battles.length > 1) {
+    text = `Blitz, ${battles.length} rounds${event.truncated ? "+" : ""}: attacker −${totalA} · defender −${totalD}`;
+  }
+  if (owner === event.player) text +=` · ${mapName(event.to)} conquered`;
+  result.textContent = text;
+  overlay.append(result);
+
+  const settle = () => {
+    overlay.classList.remove("rolling");
+    rows.forEach((row) => row.dice.forEach((die, i) => setDieFace(die, row.values[i])));
+    for (let i = 0; i < pairs; i++) {
+      attackerDice[i].classList.add(outcome[i] ? "won" : "lost");
+      defenderDice[i].classList.add(outcome[i] ? "lost" : "won");
+    }
+    attackerDice.slice(pairs).forEach((die) => die.classList.add("spare"));
+    defenderDice.slice(pairs).forEach((die) => die.classList.add("spare"));
+    overlay.classList.add("settled");
+    fx.diceTimers.push(setTimeout(hideDice, battles.length > 1 ? 4500 : 3200));
+  };
+
+  overlay.classList.remove("hidden", "settled");
+  playEffect("dice_1.wav");
+  if (fx.anim && !reducedMotion()) {
+    overlay.classList.add("rolling");
+    const spin = setInterval(() => {
+      rows.forEach((row) => row.dice.forEach((die) => setDieFace(die, 1 + Math.floor(Math.random() * 6))));
+    }, 75);
+    fx.diceTimers.push(setTimeout(() => { clearInterval(spin); settle(); }, 600));
+    fx.diceTimers.push(spin);
+  } else {
+    settle();
+  }
+}
+
+function renderEndBanner() {
+  const banner = $("end-banner");
+  const game = state.game;
+  if (!game || game.status !== "finished" || state.replayActive ||
+      !state.replayChecked || fx.endDismissed) {
+    banner.classList.add("hidden");
+    return;
+  }
+  if (!banner.classList.contains("hidden")) return;
+  banner.replaceChildren();
+  const seated = game.you >= 0;
+  const won = seated && game.winner === game.you;
+  const heading = document.createElement("h2");
+  heading.textContent = won ? "Victory!" : seated ? "Defeat" : "Game over";
+  const line = document.createElement("p");
+  line.textContent = game.winner >= 0
+    ? `${playerName(game.winner)} wins after ${game.turn} turns.`
+    : "The game ended without a winner.";
+  banner.append(heading, line);
+
+  const table = document.createElement("table");
+  table.className = "end-stats";
+  const head = table.createTHead().insertRow();
+  for (const label of ["Player", "Lands", "Taken", "Killed", "Lost", "Missions"]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    head.append(th);
+  }
+  const body = table.createTBody();
+  const order = game.players.map((player, seat) => seat)
+    .sort((a, b) => (b === game.winner) - (a === game.winner));
+  for (const seat of order) {
+    const player = game.players[seat];
+    const stats = player.stats || {};
+    const row = body.insertRow();
+    if (seat === game.winner) row.className = "winner";
+    const name = row.insertCell();
+    name.append(dot(player.faction), document.createTextNode(` ${player.user}${seat === game.you ? " (you)" : ""}`));
+    const lands = game.territories.filter((t) => t.owner === seat).length;
+    for (const value of [lands, stats.territoriesTaken, stats.armiesKilled, stats.armiesLost, player.missions]) {
+      row.insertCell().textContent = String(value ?? 0);
+    }
+  }
+  banner.append(table);
+
+  const buttons = document.createElement("div");
+  buttons.className = "row";
+  addButton(buttons, "Back to lobby", showLobby);
+  addButton(buttons, "View the board", () => {
+    fx.endDismissed = true;
+    banner.classList.add("hidden");
+  }, "secondary");
+  banner.append(buttons);
+  banner.classList.remove("hidden");
+  if (fx.endSound) {
+    fx.endSound = false;
+    if (seated) playEffect(won ? "win.wav" : "lost.wav");
+  }
+}
+
+$("dice-overlay").addEventListener("click", hideDice);
+
+$("dice-anim").checked = fx.anim;
+$("dice-anim").addEventListener("change", (event) => {
+  fx.anim = event.target.checked;
+  try { localStorage.setItem("friskDiceAnim", fx.anim ? "on" : "off"); } catch (error) { /* ignore */ }
+});
+$("sfx-toggle").checked = fx.sound;
+$("sfx-toggle").addEventListener("change", (event) => {
+  fx.sound = event.target.checked;
+  try { localStorage.setItem("friskSfx", fx.sound ? "on" : "off"); } catch (error) { /* ignore */ }
+});
 
 function musicAudio() {
   if (!music.audio) {
@@ -415,6 +658,7 @@ function showLobby() {
   if (location.hash !== "#/lobby") location.hash = "#/lobby";
   loadMaps();
   refreshLobby(true);
+  loadHistory();
   deactivateChat(chatViews.game);
   activateChat(chatView("lobby"), "lobby");
   updateMusic();
@@ -962,6 +1206,34 @@ async function loadInvites() {
 
 $("refresh-invites").addEventListener("click", loadInvites);
 
+async function loadHistory() {
+  const list = $("history");
+  const result = await get("/api/profile");
+  if (!result.ok) return;
+  list.replaceChildren();
+  const entries = (result.history || []).slice().reverse();
+  if (entries.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "muted";
+    empty.textContent = "No finished games yet.";
+    list.append(empty);
+    return;
+  }
+  for (const entry of entries) {
+    const me = (entry.players || []).find((player) => player.user === result.profile.username);
+    const item = document.createElement("li");
+    const outcome = document.createElement("strong");
+    outcome.className = me && me.won ? "won" : "lost";
+    outcome.textContent = me && me.won ? "Won" : "Lost";
+    const when = entry.finished ? new Date(entry.finished * 1000).toLocaleDateString() : "";
+    const others = (entry.players || []).map((player) => player.user).join(", ");
+    item.append(outcome, document.createTextNode(
+      ` · ${entry.name} · ${entry.turns} turns · ${when} · ${others}` +
+      (me ? ` · took ${me.taken}, killed ${me.killed}, lost ${me.lost}` : "")));
+    list.append(item);
+  }
+}
+
 $("save-profile").addEventListener("click", async () => {
   say("profile-msg", "");
   const result = await post("/api/profile/set", {
@@ -996,6 +1268,11 @@ async function openGame(id) {
   state.replayFrom = null;
   state.replayTo = null;
   state.notifiedTurn = -1;
+  fx.diceGame = null;
+  fx.endDismissed = false;
+  fx.endSound = false;
+  hideDice();
+  $("end-banner").classList.add("hidden");
   clearTimeout(state.replayTimer);
   $("replay-bar").classList.add("hidden");
   $("map-stage").replaceChildren();
@@ -1025,13 +1302,20 @@ async function loadGame(force) {
     }
     noteOnline();
     if (result.same) return;
+    const previousStatus = state.game ? state.game.status : null;
     state.game = result;
     if (!(await ensureMap(result.map))) return;
     renderGame();
     if (!state.replayChecked) {
       state.replayChecked = true;
-      maybeStartReplay(result);
+      const you = result.you >= 0 ? result.players[result.you] : null;
+      fx.endSound = result.status === "finished" && !!you && you.lastSeen < result.version;
+      await maybeStartReplay(result);
+    } else if (previousStatus === "running" && result.status === "finished") {
+      fx.endSound = true;
     }
+    maybeShowDice(result);
+    renderEndBanner();
   } finally {
     state.loadingGame = false;
   }
@@ -1118,6 +1402,14 @@ async function ensureMap(pack) {
       path.addEventListener("click", (event) => {
         if (state.suppressClick) return;
         event.stopPropagation();
+        const now = Date.now();
+        const tap = fx.lastTap;
+        fx.lastTap = { territory, at: now };
+        if (tap && tap.territory === territory && now - tap.at < 350) {
+          fx.lastTap = null;
+          zoomToTerritory(territory);
+          return;
+        }
         territoryClick(territory);
       });
     });
@@ -1145,6 +1437,20 @@ function fitMap() {
     scale,
     x: (width - state.mapWidth * scale) / 2,
     y: (height - state.mapHeight * scale) / 2
+  };
+  applyView();
+}
+
+function zoomToTerritory(index) {
+  const meta = state.mapMeta;
+  const label = meta && meta.territories && meta.territories[index] && meta.territories[index].label;
+  if (!label) return;
+  const container = $("map-container");
+  const scale = Math.min(5, Math.max(state.view.scale * 2, 1.4));
+  state.view = {
+    scale,
+    x: (container.clientWidth || 800) / 2 - label[0] * scale,
+    y: (container.clientHeight || 600) / 2 - label[1] * scale
   };
   applyView();
 }
@@ -1700,9 +2006,51 @@ function renderActions() {
   }
 }
 
+function renderFactionPicker(box) {
+  const game = state.game;
+  const factions = (state.mapMeta && state.mapMeta.factions) || [];
+  const seated = game.you >= 0;
+  const full = game.playerCount >= game.maxPlayers;
+  addHint(box, seated ? "Your faction (pick a free one to switch):" : "Pick a faction to join:");
+  const list = document.createElement("div");
+  list.className = "faction-pick";
+  factions.forEach((faction, index) => {
+    const holder = game.players.find((player) => player.faction === index);
+    const mine = seated && holder && holder.seat === game.you;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary faction-choice" + (mine ? " mine" : "");
+    button.append(dot(index), document.createTextNode(` ${faction.name || `Faction ${index + 1}`}`));
+    if (holder) {
+      const who = document.createElement("span");
+      who.className = "muted small";
+      who.textContent = mine ? " (you)" : ` (${holder.user})`;
+      button.append(who);
+    }
+    button.disabled = !!holder || (!seated && full);
+    button.addEventListener("click", () => chooseFaction(index));
+    list.append(button);
+  });
+  box.append(list);
+}
+
+async function chooseFaction(faction) {
+  const game = state.game;
+  const fields = { g: game.id, faction };
+  if (game.you < 0 && game.hasPassword) {
+    const entered = prompt("Game password:");
+    if (entered === null) return;
+    fields.password = entered;
+  }
+  const result = await post("/api/game/join", fields);
+  if (!result.ok) { toast(errorMessage(result), true); }
+  loadGame(true);
+}
+
 function renderOpenRoom(box) {
   const game = state.game;
   addHint(box, `${game.playerCount} of ${game.maxPlayers} seats taken.`);
+  if (state.mapMeta && (state.mapMeta.factions || []).length) renderFactionPicker(box);
   if (game.you >= 0) {
     const me = game.players[game.you];
     if (me && me.user === game.host) {
@@ -2031,6 +2379,7 @@ function renderMap() {
     if (state.pendingLeader) legal.recruitPlaceable.forEach((t) => selectable.add(t));
   }
   const territoryCount = Math.min(game.territories.length, meta.territories.length);
+  const last = state.replayActive ? [] : lastActionTerritories(game);
   for (let i = 0; i < territoryCount; i++) {
     const path = state.svg.querySelector(`#t${i}`);
     if (!path) continue;
@@ -2051,8 +2400,30 @@ function renderMap() {
     path.classList.toggle("selectable", selectable.has(i));
     path.classList.toggle("source", source === i);
     path.classList.toggle("target", target === i);
+    path.classList.toggle("last-action", last.includes(i));
   }
   renderBadges();
+}
+
+/* Territories an event points at; single-territory events only fill `to`. */
+function eventTerritories(event) {
+  const count = state.game ? state.game.territories.length : 0;
+  const valid = (t) => Number.isInteger(t) && t >= 0 && t < count;
+  const single = ["place", "place_leader", "claim"].includes(event.kind);
+  return {
+    from: !single && valid(event.from) ? event.from : null,
+    to: valid(event.to) ? event.to : null
+  };
+}
+
+function lastActionTerritories(game) {
+  const log = game.log || [];
+  for (let i = log.length - 1; i >= 0; i--) {
+    if (!replaySpatial(log[i])) continue;
+    const { from, to } = eventTerritories(log[i]);
+    return [from, to].filter((t) => t !== null);
+  }
+  return [];
 }
 
 function renderBadges() {
@@ -2540,12 +2911,10 @@ function replayStep() {
     return;
   }
   const event = state.replayEvents[state.replayIndex++];
-  const territories = state.game ? state.game.territories.length : 0;
   if (replaySpatial(event)) {
-    state.replayFrom = Number.isInteger(event.from) && event.from >= 0 &&
-      event.from < territories ? event.from : null;
-    state.replayTo = Number.isInteger(event.to) && event.to >= 0 &&
-      event.to < territories ? event.to : null;
+    const { from, to } = eventTerritories(event);
+    state.replayFrom = from;
+    state.replayTo = to;
   } else {
     state.replayFrom = null;
     state.replayTo = null;
@@ -2594,6 +2963,8 @@ async function maybeStartReplay(gameData) {
   state.replayTo = null;
   $("replay-speed").textContent = "1×";
   $("replay-bar").classList.remove("hidden");
+  hideDice();
+  renderEndBanner();
   renderActions();
   replayStep();
 }

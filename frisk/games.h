@@ -47,6 +47,13 @@ int games_kick(struct FriskGame *game, const char *requester,
 int games_delete(struct FriskGame *game, const char *requester,
                  int requester_is_admin, char *err, size_t err_size);
 int games_save(struct FriskGame *game);
+/* Frees RAM slots of games finished longer than FRISK_FINISHED_TTL_SECONDS
+ * (default 24 h) ago; their files stay on disk (PLAN.md 7.6). */
+void games_unload_finished(void);
+/* Returns 0 with the user's last `limit` finished-game history entries
+ * (oldest first, comma separated JSON objects) in *out, -1 on failure. */
+int games_history_for(const char *username, int limit,
+                      char **out, size_t *out_size);
 int games_append_log(struct FriskGame *game, const struct Event *events,
                      int count);
 /* Returns 0 with the last `limit` matching raw event JSON objects (comma

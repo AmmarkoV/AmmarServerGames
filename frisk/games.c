@@ -13,7 +13,11 @@
 #include "../../UserAccounts/sha256.h"
 #include "engine/serialize.h"
 #include "frisk.h"
+#include "json.h"
 #include "store.h"
+
+#define FRISK_FINISHED_TTL_DEFAULT (24L * 60L * 60L)
+#define FRISK_HISTORY_LINE 4096
 
 static struct Map *maps[FRISK_MAX_MAPS];
 static int map_count;
@@ -21,8 +25,11 @@ static struct FriskGame games[FRISK_MAX_GAMES];
 static int next_game_id = 1;
 static int lobby_version = 1;
 static char games_path[FRISK_PATH_SIZE * 2];
+static char history_path[FRISK_PATH_SIZE * 2];
 static GameEndHook game_end_hook;
 static void *game_end_hook_user;
+
+static void games_on_end(struct Game *game, int winner, void *user);
 
 static void set_error(char *err, size_t err_size, const char *fmt, ...)
 {
@@ -364,6 +371,279 @@ static void games_seed_log(struct FriskGame *game)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Finished-game history (PLAN.md 7.6)                                 */
+/* ------------------------------------------------------------------ */
+
+static long finished_ttl_seconds(void)
+{
+    static long cached = -1;
+    const char *text;
+    long value;
+
+    if (cached >= 0) {
+        return cached;
+    }
+    text = getenv("FRISK_FINISHED_TTL_SECONDS");
+    value = (text != NULL && text[0] != '\0')
+        ? strtol(text, NULL, 10) : FRISK_FINISHED_TTL_DEFAULT;
+    if (value < 0) {
+        value = FRISK_FINISHED_TTL_DEFAULT;
+    }
+    cached = value;
+    return cached;
+}
+
+static void history_put_string(char *out, size_t out_size, size_t *used,
+                               const char *text)
+{
+    const unsigned char *p = (const unsigned char *)(text ? text : "");
+
+    if (*used + 1 < out_size) {
+        out[(*used)++] = '"';
+    }
+    for (; *p != '\0' && *used + 3 < out_size; p++) {
+        if (*p == '"' || *p == '\\') {
+            out[(*used)++] = '\\';
+            out[(*used)++] = (char)*p;
+        } else if (*p >= 0x20 && *p != 0x7f) {
+            out[(*used)++] = (char)*p;
+        }
+    }
+    if (*used + 1 < out_size) {
+        out[(*used)++] = '"';
+    }
+    out[*used] = '\0';
+}
+
+static void history_put_fmt(char *out, size_t out_size, size_t *used,
+                            const char *fmt, ...)
+{
+    va_list ap;
+    int written;
+
+    if (*used >= out_size) {
+        return;
+    }
+    va_start(ap, fmt);
+    written = vsnprintf(out + *used, out_size - *used, fmt, ap);
+    va_end(ap);
+    if (written > 0) {
+        *used += (size_t)written;
+        if (*used >= out_size) {
+            *used = out_size - 1;
+        }
+    }
+}
+
+static int history_line(const struct Game *game, long finished,
+                        char *out, size_t out_size)
+{
+    size_t used = 0;
+    int i;
+
+    out[0] = '\0';
+    history_put_fmt(out, out_size, &used, "{\"id\":%d,\"name\":", game->id);
+    history_put_string(out, out_size, &used, game->name);
+    history_put_fmt(out, out_size, &used, ",\"map\":");
+    history_put_string(out, out_size, &used, game->map_pack);
+    history_put_fmt(out, out_size, &used,
+                    ",\"finished\":%ld,\"turns\":%d,\"winner\":",
+                    finished, game->turn);
+    history_put_string(out, out_size, &used,
+                       (game->winner >= 0 &&
+                        game->winner < game->player_count)
+                       ? game->seats[game->winner].username : "");
+    history_put_fmt(out, out_size, &used, ",\"players\":[");
+    for (i = 0; i < game->player_count; i++) {
+        const struct Seat *seat = &game->seats[i];
+        history_put_fmt(out, out_size, &used, "%s{\"user\":",
+                        i > 0 ? "," : "");
+        history_put_string(out, out_size, &used, seat->username);
+        history_put_fmt(out, out_size, &used,
+                        ",\"faction\":%d,\"won\":%s,\"taken\":%d,"
+                        "\"killed\":%d,\"lost\":%d}",
+                        seat->faction, i == game->winner ? "true" : "false",
+                        seat->stats.territories_taken,
+                        seat->stats.armies_killed, seat->stats.armies_lost);
+    }
+    history_put_fmt(out, out_size, &used, "]}");
+    return used + 1 < out_size;
+}
+
+static void history_append(const struct Game *game, long finished)
+{
+    char line[FRISK_HISTORY_LINE];
+    FILE *file;
+
+    if (game == NULL || history_path[0] == '\0' ||
+        !history_line(game, finished, line, sizeof(line))) {
+        return;
+    }
+    file = fopen(history_path, "a");
+    if (file == NULL) {
+        AmmServer_Warning("frisk: cannot append %s", history_path);
+        return;
+    }
+    if (fputs(line, file) == EOF || fputc('\n', file) == EOF) {
+        AmmServer_Warning("frisk: could not write %s", history_path);
+    }
+    fclose(file);
+}
+
+static int history_line_id(const char *line)
+{
+    int id = 0;
+
+    if (sscanf(line, "{\"id\":%d,", &id) != 1) {
+        return 0;
+    }
+    return id;
+}
+
+static int history_has(int id)
+{
+    char line[FRISK_HISTORY_LINE];
+    FILE *file = fopen(history_path, "r");
+    int found = 0;
+
+    if (file == NULL) {
+        return 0;
+    }
+    while (!found && fgets(line, sizeof(line), file) != NULL) {
+        found = history_line_id(line) == id;
+    }
+    fclose(file);
+    return found;
+}
+
+static int history_line_has_user(const char *line, const char *username)
+{
+    char error[128];
+    JsonValue *root = json_parse(line, error, sizeof(error));
+    const JsonValue *players;
+    size_t i;
+    int found = 0;
+
+    if (root == NULL) {
+        return 0;
+    }
+    players = json_get(root, "players");
+    for (i = 0; i < json_count(players) && !found; i++) {
+        const char *user = json_get_string(json_get(json_at(players, i),
+                                                    "user"));
+        found = user != NULL && strcmp(user, username) == 0;
+    }
+    json_free(root);
+    return found;
+}
+
+int games_history_for(const char *username, int limit,
+                      char **out, size_t *out_size)
+{
+    char line[FRISK_HISTORY_LINE];
+    char *buffer;
+    size_t capacity;
+    size_t used = 0;
+    long *offsets;
+    int count = 0;
+    int start;
+    int i;
+    FILE *file;
+
+    *out = NULL;
+    *out_size = 0;
+    if (username == NULL || limit < 1) {
+        return 0;
+    }
+    file = fopen(history_path, "r");
+    if (file == NULL) {
+        return 0;
+    }
+    offsets = (long *)calloc((size_t)limit, sizeof(long));
+    if (offsets == NULL) {
+        fclose(file);
+        return -1;
+    }
+    for (;;) {
+        long offset = ftell(file);
+        if (fgets(line, sizeof(line), file) == NULL) {
+            break;
+        }
+        if (history_line_id(line) > 0 &&
+            history_line_has_user(line, username)) {
+            offsets[count % limit] = offset;
+            count++;
+        }
+    }
+    if (count == 0) {
+        free(offsets);
+        fclose(file);
+        return 0;
+    }
+    capacity = (size_t)limit * FRISK_HISTORY_LINE + 1;
+    buffer = (char *)malloc(capacity);
+    if (buffer == NULL) {
+        free(offsets);
+        fclose(file);
+        return -1;
+    }
+    start = count > limit ? count - limit : 0;
+    for (i = start; i < count; i++) {
+        size_t length;
+        if (fseek(file, offsets[i % limit], SEEK_SET) != 0 ||
+            fgets(line, sizeof(line), file) == NULL) {
+            continue;
+        }
+        length = strcspn(line, "\r\n");
+        if (used > 0) {
+            buffer[used++] = ',';
+        }
+        memcpy(buffer + used, line, length);
+        used += length;
+    }
+    buffer[used] = '\0';
+    free(offsets);
+    fclose(file);
+    *out = buffer;
+    *out_size = used;
+    return 0;
+}
+
+static void games_on_end(struct Game *game, int winner, void *user)
+{
+    history_append(game, (long)time(NULL));
+    if (game_end_hook != NULL) {
+        game_end_hook(game, winner, user);
+    }
+}
+
+static void install_end_hook(struct Game *game)
+{
+    game->end_hook = games_on_end;
+    game->end_hook_user = game_end_hook_user;
+}
+
+static int finished_and_stale(const struct Game *game, time_t now)
+{
+    return game->status == GAME_FINISHED &&
+           (long)(now - game->updated) >= finished_ttl_seconds();
+}
+
+void games_unload_finished(void)
+{
+    time_t now = time(NULL);
+    int i;
+
+    for (i = 0; i < FRISK_MAX_GAMES; i++) {
+        if (games[i].used && finished_and_stale(&games[i].game, now)) {
+            /* The game file and log stay on disk; only the RAM slot goes. */
+            memset(&games[i], 0, sizeof(games[i]));
+            lobby_version++;
+        }
+    }
+}
+
 int games_save(struct FriskGame *game)
 {
     char filename[FRISK_PATH_SIZE * 3];
@@ -452,6 +732,7 @@ static struct FriskGame *free_slot(void)
 {
     int i;
 
+    games_unload_finished();
     for (i = 0; i < FRISK_MAX_GAMES; i++) {
         if (!games[i].used) {
             return &games[i];
@@ -502,8 +783,7 @@ struct FriskGame *games_create(const char *name, const char *map_name,
     slot->game.max_players = max_players;
     slot->game.start_mode = start_mode;
     slot->game.setup_batch_size = batch;
-    slot->game.end_hook = game_end_hook;
-    slot->game.end_hook_user = game_end_hook_user;
+    install_end_hook(&slot->game);
     hash_password(password, slot->game.password_hash,
                   sizeof(slot->game.password_hash));
     if (game_join(&slot->game, host, -1, join_error,
@@ -542,6 +822,24 @@ int games_join(struct FriskGame *game, const char *username, int faction,
     }
     seat = game_find_seat(&game->game, username);
     if (seat >= 0) {
+        /* Already seated: a faction asks to switch to a free one (8.4). */
+        if (faction >= 0 && faction != game->game.seats[seat].faction) {
+            int i;
+            if (game->map == NULL || faction >= game->map->factionCount) {
+                set_error(err, err_size, "faction");
+                return 0;
+            }
+            for (i = 0; i < game->game.player_count; i++) {
+                if (game->game.seats[i].faction == faction) {
+                    set_error(err, err_size, "faction");
+                    return 0;
+                }
+            }
+            game->game.seats[seat].faction = faction;
+            game->game.version++;
+            lobby_version++;
+            games_save(game);
+        }
         if (out_seat != NULL) {
             *out_seat = seat;
         }
@@ -641,8 +939,7 @@ int games_start(struct FriskGame *game, const char *requester,
         set_error(err, err_size, "started");
         return 0;
     }
-    game->game.end_hook = game_end_hook;
-    game->game.end_hook_user = game_end_hook_user;
+    install_end_hook(&game->game);
     if (game_start(&game->game, game->game.start_mode,
                    game->game.setup_batch_size, start_error,
                    sizeof(start_error)) != 0) {
@@ -703,6 +1000,8 @@ static void load_games(void)
     struct dirent *entry;
 
     snprintf(games_path, sizeof(games_path), "%s/games", frisk_data_dir());
+    snprintf(history_path, sizeof(history_path), "%s/history.log",
+             frisk_data_dir());
     directory = opendir(games_path);
     if (directory == NULL) {
         AmmServer_Warning("frisk: no game directory at %s", games_path);
@@ -755,6 +1054,19 @@ static void load_games(void)
             free(text);
             continue;
         }
+        if (loaded.id >= next_game_id) {
+            next_game_id = loaded.id + 1;
+        }
+        if (loaded.status == GAME_FINISHED) {
+            if (!history_has(loaded.id)) {
+                history_append(&loaded, (long)loaded.updated);
+            }
+            if (finished_and_stale(&loaded, time(NULL))) {
+                /* Kept on disk and in the history; not loaded into RAM. */
+                free(text);
+                continue;
+            }
+        }
         slot = free_slot();
         if (slot == NULL) {
             AmmServer_Warning("frisk: too many games, skipping %s",
@@ -763,14 +1075,10 @@ static void load_games(void)
             continue;
         }
         slot->game = loaded;
-        slot->game.end_hook = game_end_hook;
-        slot->game.end_hook_user = game_end_hook_user;
+        install_end_hook(&slot->game);
         slot->map = map;
         slot->used = 1;
         games_seed_log(slot);
-        if (slot->game.id >= next_game_id) {
-            next_game_id = slot->game.id + 1;
-        }
         lobby_version++;
         free(text);
     }
