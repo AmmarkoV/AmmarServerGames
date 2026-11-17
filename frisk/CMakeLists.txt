@@ -63,7 +63,8 @@ endif()
 
 if(FRISK_BUILD_TESTS)
   add_executable(frisk_tests tests/test_map.c tests/test_rules.c
-                 tests/test_serialize.c tests/test_cards.c)
+                 tests/test_serialize.c tests/test_cards.c
+                 tests/test_printed.c)
   target_link_libraries(frisk_tests frisk_engine)
 
   add_executable(frisk_fuzz tests/fuzz_games.c)

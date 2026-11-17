@@ -28,6 +28,11 @@ const state = {
   pendingPlace: null,
   pendingLeader: null,
   bringLeader: false,
+  blitzStop: 1,
+  cardPlay: null,   /* printed power waiting for map picks: {slot, effect, from} */
+  viewFitted: true,
+  hover: null,
+  pieceSymbols: null,
   view: { scale: 1, x: 0, y: 0 },
   pointers: new Map(),
   drag: null,
@@ -134,7 +139,12 @@ const fx = {
   diceTimers: [],
   endDismissed: false,
   endSound: false,
-  lastTap: null
+  lastTap: null,
+  lastPointer: "mouse",
+  audio: null,
+  chimes: 0,
+  infoTimer: null,
+  lobbyTurns: null
 };
 
 try {
@@ -154,6 +164,46 @@ function playEffect(file) {
     audio.volume = 0.8;
     const playing = audio.play();
     if (playing) playing.catch(() => { /* autoplay blocked */ });
+  } catch (error) { /* audio unavailable */ }
+}
+
+/* "Your turn" chime.  Desktop notifications need HTTPS/localhost, so on a
+ * plain-HTTP LAN this sound (plus the tab title) is the turn signal. */
+function audioContext() {
+  const Context = window.AudioContext || window.webkitAudioContext;
+  if (!Context) return null;
+  if (!fx.audio) fx.audio = new Context();
+  if (fx.audio.state === "suspended") fx.audio.resume().catch(() => { /* needs a gesture */ });
+  return fx.audio;
+}
+
+function unlockAudio() {
+  try { audioContext(); } catch (error) { /* audio unavailable */ }
+  document.removeEventListener("pointerdown", unlockAudio, true);
+  document.removeEventListener("keydown", unlockAudio, true);
+}
+document.addEventListener("pointerdown", unlockAudio, true);
+document.addEventListener("keydown", unlockAudio, true);
+
+function playTurnChime() {
+  if (!fx.sound) return;
+  try {
+    const ctx = audioContext();
+    if (!ctx || ctx.state !== "running") return;
+    const now = ctx.currentTime;
+    for (const [frequency, at] of [[659.25, 0], [880, 0.15]]) {
+      const tone = ctx.createOscillator();
+      const gain = ctx.createGain();
+      tone.type = "sine";
+      tone.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, now + at);
+      gain.gain.exponentialRampToValueAtTime(0.22, now + at + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + at + 0.5);
+      tone.connect(gain).connect(ctx.destination);
+      tone.start(now + at);
+      tone.stop(now + at + 0.55);
+    }
+    fx.chimes++;
   } catch (error) { /* audio unavailable */ }
 }
 
@@ -352,6 +402,7 @@ function renderEndBanner() {
 }
 
 $("dice-overlay").addEventListener("click", hideDice);
+$("card-viewer").addEventListener("click", () => $("card-viewer").classList.add("hidden"));
 
 $("dice-anim").checked = fx.anim;
 $("dice-anim").addEventListener("change", (event) => {
@@ -625,6 +676,7 @@ async function refreshMe(silent = false) {
 
 function showAuth() {
   state.viewMode = "auth";
+  document.body.classList.toggle("in-game", state.viewMode === "game");
   state.gameId = null;
   $("auth-view").classList.remove("hidden");
   $("lobby-view").classList.add("hidden");
@@ -649,6 +701,7 @@ function showLobby() {
   if (state.replayActive) cancelReplay(true);
   else if (state.viewMode === "game") markSeen();
   state.viewMode = "lobby";
+  document.body.classList.toggle("in-game", state.viewMode === "game");
   $("auth-view").classList.add("hidden");
   $("lobby-view").classList.remove("hidden");
   $("game-view").classList.add("hidden");
@@ -666,6 +719,8 @@ function showLobby() {
 
 function showGame() {
   state.viewMode = "game";
+  document.body.classList.toggle("in-game", state.viewMode === "game");
+  applyTabs();
   $("auth-view").classList.add("hidden");
   $("lobby-view").classList.add("hidden");
   $("game-view").classList.remove("hidden");
@@ -888,6 +943,7 @@ function showAdmin() {
   if (state.replayActive) cancelReplay(true);
   else if (state.viewMode === "game") markSeen();
   state.viewMode = "admin";
+  document.body.classList.toggle("in-game", state.viewMode === "game");
   $("auth-view").classList.add("hidden");
   $("lobby-view").classList.add("hidden");
   $("game-view").classList.add("hidden");
@@ -1010,22 +1066,39 @@ async function refreshLobby(force = false) {
   renderLobby();
 }
 
-function factionColour(faction) {
-  const meta = state.mapMeta;
+const packMeta = {};
+const packLoading = new Set();
+
+function loadPackMeta(pack) {
+  if (!pack || packMeta[pack] || packLoading.has(pack)) return;
+  packLoading.add(pack);
+  fetch(`/maps/${encodeURIComponent(pack)}/map.json`)
+    .then((response) => response.json())
+    .then((meta) => {
+      packMeta[pack] = meta;
+      if (state.viewMode === "lobby") renderLobby();
+    })
+    .catch(() => { /* dots stay grey */ })
+    .finally(() => packLoading.delete(pack));
+}
+
+function factionColour(faction, pack) {
+  const meta = (pack && packMeta[pack]) || state.mapMeta;
   if (meta && meta.factions && meta.factions[faction]) {
     return meta.factions[faction].color || "#999";
   }
   return "#999";
 }
 
-function dot(faction) {
+function dot(faction, pack) {
   const span = document.createElement("span");
   span.className = "player-dot";
-  span.style.background = factionColour(faction);
+  span.style.background = factionColour(faction, pack);
   return span;
 }
 
 function gameItem(game, kind) {
+  loadPackMeta(game.map);
   const item = document.createElement("div");
   item.className = "game-item";
   const title = document.createElement("div");
@@ -1055,7 +1128,7 @@ function gameItem(game, kind) {
   (game.players || []).forEach((player) => {
     const span = document.createElement("span");
     span.style.marginRight = "8px";
-    span.append(dot(player.faction), document.createTextNode(" " + player.user));
+    span.append(dot(player.faction, game.map), document.createTextNode(" " + player.user));
     who.append(span);
   });
   item.append(title, meta, who);
@@ -1094,7 +1167,7 @@ function renderList(id, games, kind) {
   if (!games || games.length === 0) {
     const empty = document.createElement("p");
     empty.className = "small muted";
-    empty.textContent = kind === "open" ? "No open tables." : kind === "running" ? "No games in progress." : "No games yet - create one below.";
+    empty.textContent = kind === "open" ? "No open tables to join." : kind === "running" ? "No other games to watch." : "No games yet - create one below.";
     list.append(empty);
     return;
   }
@@ -1109,8 +1182,14 @@ function renderLobby() {
     return (b.updated || 0) - (a.updated || 0);
   });
   renderList("your-games", sorted(data.yourGames, true), "your");
-  renderList("open-games", sorted(data.openGames, false), "open");
-  renderList("running-games", sorted(data.runningGames, false), "running");
+  /* Your own games are already listed first; the other lists are for joining
+   * and spectating. */
+  const others = (games) => (games || []).filter((game) => game.yourSeat < 0);
+  renderList("open-games", sorted(others(data.openGames), false), "open");
+  renderList("running-games", sorted(others(data.runningGames), false), "running");
+  const turns = new Set((data.yourGames || []).filter((game) => game.yourTurn).map((game) => game.id));
+  if (fx.lobbyTurns && [...turns].some((id) => !fx.lobbyTurns.has(id))) playTurnChime();
+  fx.lobbyTurns = turns;
   maybeNotifyLobby();
 }
 
@@ -1256,10 +1335,13 @@ async function openGame(id) {
   state.mapPack = null;
   state.svg = null;
   state.badges = null;
+  state.pieceSymbols = null;
+  state.hover = null;
   state.selectedFrom = null;
   state.selectedTo = null;
   state.pendingPlace = null;
   state.pendingLeader = null;
+  state.cardPlay = null;
   state.bringLeader = false;
   state.replayChecked = false;
   state.replayActive = false;
@@ -1269,6 +1351,11 @@ async function openGame(id) {
   state.replayTo = null;
   state.notifiedTurn = -1;
   fx.diceGame = null;
+  clearTimeout(fx.infoTimer);
+  $("territory-info").classList.add("hidden");
+  tabs.logSeen = null;
+  tabs.chatUnread = 0;
+  tabs.open = false;
   fx.endDismissed = false;
   fx.endSound = false;
   hideDice();
@@ -1303,11 +1390,15 @@ async function loadGame(force) {
     noteOnline();
     if (result.same) return;
     const previousStatus = state.game ? state.game.status : null;
+    const wasMine = !!(state.game && state.game.id === result.id && isMyTurn(state.game));
+    const firstLoad = !(state.game && state.game.id === result.id);
     state.game = result;
+    if (!firstLoad && !wasMine && isMyTurn(result)) playTurnChime();
     if (!(await ensureMap(result.map))) return;
     renderGame();
     if (!state.replayChecked) {
       state.replayChecked = true;
+      refitIfFitted();
       const you = result.you >= 0 ? result.players[result.you] : null;
       fx.endSound = result.status === "finished" && !!you && you.lastSeen < result.version;
       await maybeStartReplay(result);
@@ -1398,24 +1489,37 @@ async function ensureMap(pack) {
     badges.setAttribute("id", "badges");
     svg.appendChild(badges);
     svg.querySelectorAll("path.territory").forEach((path) => {
-      const territory = Number(path.id.replace("t", ""));
-      path.addEventListener("click", (event) => {
-        if (state.suppressClick) return;
-        event.stopPropagation();
-        const now = Date.now();
-        const tap = fx.lastTap;
-        fx.lastTap = { territory, at: now };
-        if (tap && tap.territory === territory && now - tap.at < 350) {
-          fx.lastTap = null;
-          zoomToTerritory(territory);
-          return;
-        }
-        territoryClick(territory);
-      });
+      path.setAttribute("data-t", path.id.replace("t", ""));
     });
+    svg.insertBefore(buildHitAreas(meta, width, height), badges);
+    state.pieceSymbols = await loadPieces(svg, meta, pack);
+    svg.addEventListener("pointerdown", (event) => { fx.lastPointer = event.pointerType || "mouse"; });
+    svg.addEventListener("click", (event) => {
+      const hit = event.target.closest && event.target.closest("[data-t]");
+      if (!hit || state.suppressClick) return;
+      event.stopPropagation();
+      const territory = Number(hit.getAttribute("data-t"));
+      if (fx.lastPointer !== "mouse") showInfo(territory, true);
+      const now = Date.now();
+      const tap = fx.lastTap;
+      fx.lastTap = { territory, at: now };
+      if (tap && tap.territory === territory && now - tap.at < 350) {
+        fx.lastTap = null;
+        zoomToTerritory(territory);
+        return;
+      }
+      territoryClick(territory);
+    });
+    svg.addEventListener("pointerover", (event) => {
+      if (event.pointerType !== "mouse") return;
+      const hit = event.target.closest && event.target.closest("[data-t]");
+      setHover(hit ? Number(hit.getAttribute("data-t")) : null);
+    });
+    svg.addEventListener("pointerleave", () => setHover(null));
     $("map-stage").replaceChildren(svg);
     state.mapMeta = meta;
     state.mapPack = pack;
+    packMeta[pack] = meta;
     state.mapWidth = width;
     state.mapHeight = height;
     state.svg = svg;
@@ -1428,6 +1532,134 @@ async function ensureMap(pack) {
   }
 }
 
+/* The pack's territory shapes are small anchor hexes (about 40 map px, so
+ * 12-17 px on a fitted board).  Each territory also gets an invisible hit
+ * area: its nearest-label (Voronoi) cell, capped to a radius, so a tap
+ * anywhere near a territory's badge selects it. */
+function clipHalfPlane(polygon, a, b, c) {
+  const out = [];
+  for (let k = 0; k < polygon.length; k++) {
+    const p = polygon[k];
+    const q = polygon[(k + 1) % polygon.length];
+    const fp = a * p[0] + b * p[1] - c;
+    const fq = a * q[0] + b * q[1] - c;
+    if (fp <= 0) out.push(p);
+    if ((fp < 0 && fq > 0) || (fp > 0 && fq < 0)) {
+      const t = fp / (fp - fq);
+      out.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]);
+    }
+  }
+  return out;
+}
+
+function hitCell(points, index, width, height, radius) {
+  const [px, py] = points[index];
+  let cell = [];
+  for (let k = 0; k < 24; k++) {
+    const angle = (k / 24) * Math.PI * 2;
+    cell.push([px + Math.cos(angle) * radius, py + Math.sin(angle) * radius]);
+  }
+  cell = clipHalfPlane(cell, -1, 0, 0);
+  cell = clipHalfPlane(cell, 1, 0, width);
+  cell = clipHalfPlane(cell, 0, -1, 0);
+  cell = clipHalfPlane(cell, 0, 1, height);
+  for (let j = 0; j < points.length && cell.length >= 3; j++) {
+    if (j === index || !points[j]) continue;
+    const [qx, qy] = points[j];
+    const nx = qx - px;
+    const ny = qy - py;
+    cell = clipHalfPlane(cell, nx, ny, nx * (px + qx) / 2 + ny * (py + qy) / 2);
+  }
+  return cell;
+}
+
+function buildHitAreas(meta, width, height) {
+  const group = document.createElementNS(NS, "g");
+  group.setAttribute("id", "hit-areas");
+  const territories = (meta && meta.territories) || [];
+  const points = territories.map((t) => (Array.isArray(t.label) && t.label.length === 2
+    ? [Number(t.label[0]), Number(t.label[1])] : null));
+  const count = points.filter(Boolean).length;
+  if (!count) return group;
+  const radius = 0.7 * Math.sqrt((width * height) / count);
+  points.forEach((point, index) => {
+    if (!point) return;
+    const cell = hitCell(points, index, width, height, radius);
+    if (cell.length < 3) return;
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("class", "hit");
+    path.setAttribute("data-t", String(index));
+    path.setAttribute("d", "M" + cell.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join("L") + "Z");
+    group.append(path);
+  });
+  return group;
+}
+
+function territoryInfo(index) {
+  const game = state.game;
+  const meta = state.mapMeta;
+  const def = meta && meta.territories && meta.territories[index];
+  if (!game || !def || !game.territories[index]) return null;
+  const territory = game.territories[index];
+  const box = document.createElement("div");
+  const name = document.createElement("strong");
+  name.textContent = def.name || `#${index}`;
+  box.append(name);
+  const region = (meta.regions || []).find((entry) => entry.id === def.region);
+  if (region) {
+    const span = document.createElement("span");
+    span.className = "muted";
+    span.textContent = ` · ${region.name} (+${region.bonus})`;
+    box.append(span);
+  }
+  const line = document.createElement("div");
+  if (territory.neutral) {
+    line.append(document.createTextNode(`Neutral · ${territory.armies} armies`));
+  } else if (territory.owner >= 0) {
+    line.append(dot(playerFaction(territory.owner)),
+      document.createTextNode(` ${playerName(territory.owner)} · ${territory.armies} ${territory.armies === 1 ? "army" : "armies"}`));
+  } else {
+    line.append(document.createTextNode("Unclaimed"));
+  }
+  box.append(line);
+  const marks = [];
+  if (territory.leader) marks.push(`★ ${playerName(territory.leader - 1)}'s leader`);
+  if (def.stronghold) marks.push("⌂ stronghold");
+  if (def.site) marks.push("✦ site of power");
+  if (marks.length) {
+    const extra = document.createElement("div");
+    extra.className = "muted";
+    extra.textContent = marks.join(" · ");
+    box.append(extra);
+  }
+  return box;
+}
+
+/* Hover (mouse) or tap (touch) shows what a territory is; touch hides it
+ * again after a few seconds. */
+function showInfo(index, autoHide) {
+  const chip = $("territory-info");
+  clearTimeout(fx.infoTimer);
+  const content = index === null ? null : territoryInfo(index);
+  if (!content) {
+    chip.classList.add("hidden");
+    return;
+  }
+  chip.replaceChildren(content);
+  chip.classList.remove("hidden");
+  if (autoHide) fx.infoTimer = setTimeout(() => chip.classList.add("hidden"), 3500);
+}
+
+function setHover(index) {
+  if (state.hover === index) return;
+  const old = state.svg && state.hover !== null ? state.svg.querySelector(`#t${state.hover}`) : null;
+  if (old) old.classList.remove("hover");
+  state.hover = index;
+  const next = state.svg && index !== null ? state.svg.querySelector(`#t${index}`) : null;
+  if (next) next.classList.add("hover");
+  showInfo(index, false);
+}
+
 function fitMap() {
   const container = $("map-container");
   const width = container.clientWidth || 800;
@@ -1438,7 +1670,14 @@ function fitMap() {
     x: (width - state.mapWidth * scale) / 2,
     y: (height - state.mapHeight * scale) / 2
   };
+  state.viewFitted = true;
   applyView();
+}
+
+/* Refit after the map container changed size (replay bar, first render of
+ * the controls), unless the player has already panned or zoomed. */
+function refitIfFitted() {
+  if (state.viewFitted && state.svg) requestAnimationFrame(fitMap);
 }
 
 function zoomToTerritory(index) {
@@ -1452,6 +1691,7 @@ function zoomToTerritory(index) {
     x: (container.clientWidth || 800) / 2 - label[0] * scale,
     y: (container.clientHeight || 600) / 2 - label[1] * scale
   };
+  state.viewFitted = false;
   applyView();
 }
 
@@ -1471,6 +1711,7 @@ function zoomAt(clientX, clientY, factor) {
   view.x = cx - (cx - view.x) * ratio;
   view.y = cy - (cy - view.y) * ratio;
   view.scale = next;
+  state.viewFitted = false;
   applyView();
 }
 
@@ -1502,8 +1743,19 @@ function pinchInfo() {
   };
 }
 
+function capturePointer(id) {
+  try { mapContainer.setPointerCapture(id); } catch (error) { /* pointer already gone */ }
+}
+
+/* Pointer capture starts only once a press becomes a drag or pinch.  Capturing
+ * on pointerdown retargets the click that ends a plain press to the container,
+ * so territories never received mouse clicks. */
 mapContainer.addEventListener("pointerdown", (event) => {
-  mapContainer.setPointerCapture(event.pointerId);
+  if (tabs.open && dockLayout()) {
+    tabs.open = false;
+    applyTabs();
+  }
+  hideDice();
   state.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
   mapContainer.classList.add("dragging");
   if (state.pointers.size === 1) {
@@ -1514,11 +1766,17 @@ mapContainer.addEventListener("pointerdown", (event) => {
   } else {
     state.drag = null;
     state.pinch = pinchInfo();
+    state.pointers.forEach((point, id) => capturePointer(id));
   }
 });
 
 mapContainer.addEventListener("pointermove", (event) => {
   if (!state.pointers.has(event.pointerId)) return;
+  if (event.pointerType === "mouse" && event.buttons === 0) {
+    /* Released outside the window before the drag captured the pointer. */
+    endPointer(event);
+    return;
+  }
   state.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
   if (state.pointers.size === 2 && state.pinch) {
     const info = pinchInfo();
@@ -1534,6 +1792,7 @@ mapContainer.addEventListener("pointermove", (event) => {
     view.x += info.midX - state.pinch.midX;
     view.y += info.midY - state.pinch.midY;
     state.pinch = info;
+    state.viewFitted = false;
     applyView();
     state.suppressClick = true;
   } else if (state.drag) {
@@ -1543,9 +1802,12 @@ mapContainer.addEventListener("pointermove", (event) => {
     state.view.y += dy;
     state.drag.x = event.clientX;
     state.drag.y = event.clientY;
-    if (Math.hypot(event.clientX - state.drag.startX, event.clientY - state.drag.startY) > 6) {
+    if (!state.drag.moved &&
+        Math.hypot(event.clientX - state.drag.startX, event.clientY - state.drag.startY) > 6) {
       state.drag.moved = true;
       state.suppressClick = true;
+      state.viewFitted = false;
+      capturePointer(event.pointerId);
     }
     applyView();
   }
@@ -1621,6 +1883,22 @@ function territoryClick(index) {
     return;
   }
   const legal = game.legal;
+  const printed = game.printed || {};
+  if (legal.freeLeaderPending) {
+    if (legal.leaderPlaceable.includes(index)) act("place_leader", { t: index });
+    return;
+  }
+  if (printed.bonus > 0) {
+    if ((legal.bonusPlaceable || []).includes(index)) {
+      state.pendingPlace = { type: "place", territory: index, max: printed.bonus, bonus: true };
+      renderGame();
+    }
+    return;
+  }
+  if (state.cardPlay) {
+    cardPlayClick(index);
+    return;
+  }
   if (game.phase === "setup_claim") {
     if (legal.claimable.includes(index)) act("claim", { t: index });
     return;
@@ -1628,7 +1906,7 @@ function territoryClick(index) {
   if (game.phase === "setup_place") {
     if (legal.batchRemaining > 0 && legal.placeable.includes(index)) {
       state.pendingPlace = { type: "place", territory: index, max: legal.batchRemaining };
-      renderActions();
+      renderGame();
     }
     return;
   }
@@ -1639,7 +1917,7 @@ function territoryClick(index) {
   if (game.phase === "reinforce") {
     if (legal.reinforcementsPending > 0 && legal.placeable.includes(index)) {
       state.pendingPlace = { type: "place", territory: index, max: legal.reinforcementsPending };
-      renderActions();
+      renderGame();
     }
     return;
   }
@@ -1686,6 +1964,133 @@ function territoryClick(index) {
   }
 }
 
+/* ---------------------------------------------------------------- */
+/* Side tabs: Players · Cards · Log · Chat (PLAN.md 8.11)            */
+/* ---------------------------------------------------------------- */
+
+const tabs = { active: "players", open: false, logSeen: null, chatUnread: 0 };
+const dockQuery = matchMedia("(max-width: 999px) and (orientation: portrait)");
+
+try {
+  const saved = localStorage.getItem("friskTab");
+  if (["players", "cards", "log", "chat"].includes(saved)) tabs.active = saved;
+} catch (error) { /* storage unavailable */ }
+
+/* Portrait phones/tablets dock the controls at the bottom and show a tab as a
+ * slide-up sheet; wider screens keep one tab open in the side column. */
+function dockLayout() {
+  return dockQuery.matches;
+}
+
+function tabVisible(name) {
+  return state.viewMode === "game" && tabs.active === name &&
+    (!dockLayout() || tabs.open) && document.visibilityState === "visible";
+}
+
+function selectTab(name) {
+  if (dockLayout()) {
+    tabs.open = !(tabs.open && tabs.active === name);
+  }
+  tabs.active = name;
+  try { localStorage.setItem("friskTab", name); } catch (error) { /* ignore */ }
+  applyTabs();
+  if (name === "chat" && tabVisible("chat")) {
+    const log = $("game-chat-log");
+    log.scrollTop = log.scrollHeight;
+  }
+}
+
+function applyTabs() {
+  const docked = dockLayout();
+  document.querySelectorAll("#side-tabs .tab").forEach((button) => {
+    const on = button.dataset.tab === tabs.active && (!docked || tabs.open);
+    button.classList.toggle("active", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  document.querySelectorAll(".tab-panel").forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.tab === tabs.active);
+  });
+  $("game-side").classList.toggle("sheet-open", docked && tabs.open);
+  updateTabBadges();
+}
+
+function setBadge(id, text, urgent) {
+  const badge = $(id);
+  badge.textContent = text;
+  badge.classList.toggle("hidden", !text);
+  badge.classList.toggle("urgent", !!urgent);
+}
+
+function updateTabBadges() {
+  const game = state.game;
+  if (game) {
+    if (tabs.logSeen === null || tabVisible("log")) tabs.logSeen = game.version;
+    const unread = (game.log || []).filter((event) => event.version > tabs.logSeen).length;
+    setBadge("badge-log", unread ? (unread > 9 ? "9+" : String(unread)) : "");
+    const cards = (game.hand || []).length + (game.adventureHand || []).length;
+    const flags = game.flags || {};
+    const urgent = game.you >= 0 && game.current === game.you &&
+      (flags.mustTrade || flags.mustDiscardAdventure);
+    setBadge("badge-cards", urgent ? "!" : cards ? String(cards) : "", urgent);
+  }
+  if (tabVisible("chat")) tabs.chatUnread = 0;
+  setBadge("badge-chat", tabs.chatUnread ? (tabs.chatUnread > 9 ? "9+" : String(tabs.chatUnread)) : "", true);
+}
+
+document.querySelectorAll("#side-tabs .tab").forEach((button) => {
+  button.addEventListener("click", () => selectTab(button.dataset.tab));
+});
+dockQuery.addEventListener("change", () => {
+  tabs.open = false;
+  applyTabs();
+  refitIfFitted();
+});
+
+/* Territories the current card-play step accepts. */
+function cardPlayTargets() {
+  const game = state.game;
+  const play = state.cardPlay;
+  const me = game.you;
+  const out = [];
+  const frozen = new Set(((game.printed || {}).frozen || []).map(([t]) => t));
+  game.territories.forEach((t, i) => {
+    if (play.effect === "MOUNTAIN_PASS") {
+      if (play.from === null) {
+        if (t.owner === me && t.armies >= 2 && !frozen.has(i) &&
+            game.territories.some((u, j) => u.owner !== me && u.armies > 0 && !frozen.has(j) && sameRange(i, j))) out.push(i);
+      } else if (t.owner !== me && t.armies > 0 && !frozen.has(i) && sameRange(play.from, i)) {
+        out.push(i);
+      }
+    } else if (play.from === null) {
+      if (t.leader === me + 1) out.push(i);
+    } else if (t.owner === me && t.leader === 0 && i !== play.from) {
+      out.push(i);
+    }
+  });
+  return out;
+}
+
+async function cardPlayClick(index) {
+  const play = state.cardPlay;
+  if (!cardPlayTargets().includes(index)) return;
+  if (play.from === null) {
+    play.from = index;
+    state.selectedFrom = index;
+    renderGame();
+    return;
+  }
+  const from = play.from;
+  state.cardPlay = null;
+  const ok = await act("play_card", { card: play.slot, from, to: index });
+  if (ok && play.effect === "MOUNTAIN_PASS") {
+    state.selectedFrom = from;   /* the invasion is now open: pick dice */
+    state.selectedTo = index;
+    renderGame();
+  } else if (!ok) {
+    renderGame();
+  }
+}
+
 function renderGame() {
   const game = state.game;
   if (!game) return;
@@ -1705,6 +2110,7 @@ function renderGame() {
   renderAdventure();
   renderLog();
   renderMap();
+  updateTabBadges();
   updateTitle();
   updateMusic();
   updateChatControls(chatViews.game);
@@ -1793,6 +2199,46 @@ function renderPlayers() {
     }
     box.append(status);
   }
+  if (game.status !== "open") renderRegions(box);
+}
+
+/* Each region with its bonus and who holds it (or how much of it you hold),
+ * so the "+N regions" in the reinforcement breakdown can be read off. */
+function renderRegions(box) {
+  const game = state.game;
+  const meta = state.mapMeta;
+  if (!meta || !(meta.regions || []).length) return;
+  const heading = document.createElement("h3");
+  heading.textContent = "Regions";
+  box.append(heading);
+  const list = document.createElement("div");
+  list.className = "regions";
+  const regions = meta.regions.slice().sort((a, b) => b.bonus - a.bonus || a.name.localeCompare(b.name));
+  for (const region of regions) {
+    const members = meta.territories
+      .map((def, index) => (def.region === region.id ? index : -1))
+      .filter((index) => index >= 0 && game.territories[index]);
+    const owners = new Set(members.map((index) => game.territories[index].owner));
+    const holder = owners.size === 1 ? [...owners][0] : -1;
+    const row = document.createElement("div");
+    row.className = "region-row" + (holder >= 0 && holder === game.you ? " mine" : "");
+    const name = document.createElement("span");
+    name.className = "rname";
+    name.textContent = `${region.name} +${region.bonus}`;
+    const detail = document.createElement("span");
+    detail.className = "detail";
+    if (holder >= 0 && !game.territories[members[0]].neutral) {
+      detail.append(dot(playerFaction(holder)), document.createTextNode(` ${playerName(holder)}`));
+    } else if (game.you >= 0) {
+      const mine = members.filter((index) => game.territories[index].owner === game.you).length;
+      detail.textContent = `you ${mine}/${members.length}`;
+    } else {
+      detail.textContent = `${members.length} lands`;
+    }
+    row.append(name, detail);
+    list.append(row);
+  }
+  box.append(list);
 }
 
 async function voteKick(target) {
@@ -1825,17 +2271,54 @@ function addHint(parent, text) {
   parent.append(node);
 }
 
-function placeControls(parent, max, type, territory) {
-  const choices = [...new Set([1, 5, max].filter((n) => n >= 1 && n <= max))];
-  for (const count of choices) {
-    addButton(parent, String(count), async () => {
-      state.pendingPlace = null;
-      await act(type, { t: territory, count });
-    });
+/* Slider for any count between min and max plus a confirm button; quick
+ * buttons for the usual amounts are added by the caller. */
+function countPicker(parent, { min, max, initial, verb, onPick }) {
+  const row = document.createElement("div");
+  row.className = "count-picker";
+  const go = document.createElement("button");
+  go.type = "button";
+  go.dataset.confirm = "1";
+  let value = Math.max(min, Math.min(max, initial));
+  const sync = () => { go.textContent = `${verb} ${value}`; };
+  if (max > min) {
+    const range = document.createElement("input");
+    range.type = "range";
+    range.min = String(min);
+    range.max = String(max);
+    range.step = "1";
+    range.value = String(value);
+    range.setAttribute("aria-label", `${verb}: how many armies`);
+    range.addEventListener("input", () => { value = Number(range.value); sync(); });
+    row.append(range);
   }
-  addButton(parent, "Cancel", () => {
+  sync();
+  go.addEventListener("click", () => onPick(value));
+  row.append(go);
+  parent.append(row);
+}
+
+function quickRow(parent) {
+  const row = document.createElement("div");
+  row.className = "quick";
+  parent.append(row);
+  return row;
+}
+
+function placeControls(parent, max, type, territory) {
+  addHint(parent, `Place armies in ${mapName(territory)}.`);
+  const place = async (count) => {
     state.pendingPlace = null;
-    renderActions();
+    await act(type, { t: territory, count });
+  };
+  countPicker(parent, { min: 1, max, initial: max, verb: "Place", onPick: place });
+  const quick = quickRow(parent);
+  for (const count of [1, 5].filter((n) => n < max)) {
+    addButton(quick, String(count), () => place(count), "secondary");
+  }
+  addButton(quick, "Cancel", () => {
+    state.pendingPlace = null;
+    renderGame();
   }, "secondary");
 }
 
@@ -1896,6 +2379,44 @@ function renderActions() {
     addHint(box, `Waiting for ${playerName(game.current)}…`);
     return;
   }
+  const printed = game.printed || {};
+  const effects = [];
+  if (printed.toll >= 0) effects.push(`Corsairs of Umbar: seaborne invasions lose 3 battalions first (until ${playerName(printed.toll)}'s turn)`);
+  if ((printed.frozen || []).length) effects.push(`Winter Storms: no invasions into or out of ${printed.frozen.map(([t]) => mapName(t)).join(", ")}`);
+  if ((printed.blockedBridges || []).length) effects.push(`Blocked bridges (Leader needed): ${printed.blockedBridges.map(([b]) => bridgeName(b)).join(", ")}`);
+  for (const text of effects) {
+    const note = document.createElement("p");
+    note.className = "hint effect-note";
+    note.textContent = text;
+    box.append(note);
+  }
+  if (legal.freeLeaderPending) {
+    addHint(box, "Appoint a Second Leader: click one of your territories for the new Leader.");
+    return;
+  }
+  if (printed.bonus > 0) {
+    if (state.pendingPlace && state.pendingPlace.bonus) {
+      const t = state.pendingPlace.territory;
+      addHint(box, `Mission battalions for ${mapName(t)}.`);
+      const place = (count) => { state.pendingPlace = null; act("place", { t, count }); };
+      countPicker(box, { min: printed.bonusSplit ? 1 : printed.bonus, max: printed.bonus,
+        initial: printed.bonus, verb: "Place", onPick: place });
+      addButton(quickRow(box), "Cancel", () => { state.pendingPlace = null; renderGame(); }, "secondary");
+    } else {
+      addHint(box, `Mission complete: place ${printed.bonus} battalions — click a highlighted territory${printed.bonusSplit ? "" : " (all in one)"}.`);
+    }
+    return;
+  }
+  if (state.cardPlay) {
+    const play = state.cardPlay;
+    addHint(box, play.effect === "MOUNTAIN_PASS"
+      ? (play.from === null ? "The Way Is Under the Mountains: click your territory next to a mountain range."
+        : `Now click an enemy territory next to the same range as ${mapName(play.from)}.`)
+      : (play.from === null ? "Borne to Another Place: click the territory with the Leader to move."
+        : `Now click your territory to move the Leader from ${mapName(play.from)} to.`));
+    addButton(box, "Cancel", () => { state.cardPlay = null; renderGame(); }, "secondary");
+    return;
+  }
   if (game.flags && game.flags.mustTrade) {
     addHint(box, "You have five or more territory cards and must trade a set.");
     const set = findSet(game.hand);
@@ -1929,8 +2450,8 @@ function renderActions() {
       }, "secondary");
     }
     if (legal.reinforcementsPending > 0) {
-      addHint(box, "Click a highlighted territory to place armies.");
       if (state.pendingPlace) placeControls(box, state.pendingPlace.max, "place", state.pendingPlace.territory);
+      else addHint(box, "Click a highlighted territory to place armies.");
     } else if (legal.canDoneReinforce) {
       const done = addButton(box, "Done reinforcing", () => act("done_reinforce", {}));
       done.dataset.confirm = "1";
@@ -1944,18 +2465,54 @@ function renderActions() {
         ? "Click one of your territories with two or more armies."
         : "Click a highlighted enemy territory to attack.");
     } else {
-      addHint(box, `Attack ${mapName(state.selectedTo)} from ${mapName(state.selectedFrom)}.`);
+      const from = state.selectedFrom;
+      const to = state.selectedTo;
+      const own = game.territories[from].armies;
+      addHint(box, `Attack ${mapName(to)} (${game.territories[to].armies}) from ${mapName(from)} (${own}).`);
+      const diceRow = quickRow(box);
       for (let dice = 1; dice <= pair.maxDice; dice++) {
-        addButton(box, `${dice} ${dice === 1 ? "die" : "dice"}`, () => act("attack", { from: state.selectedFrom, to: state.selectedTo, dice }));
+        addButton(diceRow, `${dice} ${dice === 1 ? "die" : "dice"}`, () => act("attack", { from, to, dice }));
       }
-      addButton(box, "Blitz (stop at 1)", () => act("attack", {
-        from: state.selectedFrom, to: state.selectedTo, dice: pair.maxDice,
-        repeat: 1, stopAt: 1
+      /* Blitz repeats max-dice rounds until the target falls or the source is
+       * down to the chosen number of armies (PLAN.md 8.6 "stop at N"). */
+      const blitzRow = quickRow(box);
+      const stop = document.createElement("select");
+      stop.className = "stop-at";
+      stop.setAttribute("aria-label", "Blitz stops when the attacking territory is down to");
+      const stops = [1, 2, 3, 5, 10].filter((n) => n < own);
+      for (const n of stops) {
+        const option = document.createElement("option");
+        option.value = String(n);
+        option.textContent = `stop at ${n}`;
+        stop.append(option);
+      }
+      stop.value = String(stops.filter((n) => n <= state.blitzStop).pop() || 1);
+      stop.addEventListener("change", () => { state.blitzStop = Number(stop.value); });
+      addButton(blitzRow, "Blitz", () => act("attack", {
+        from, to, dice: pair.maxDice, repeat: 1, stopAt: Number(stop.value)
       }), "secondary");
-      addButton(box, "Clear", () => {
+      blitzRow.append(stop);
+      addButton(blitzRow, "Clear", () => {
         state.selectedFrom = state.selectedTo = null;
         renderGame();
       }, "secondary");
+      /* Printed cards that act on this invasion. */
+      const inv = printed.invasion;
+      if (inv && inv.from === from && inv.to === to && (inv.noStronghold || inv.bonus)) {
+        addHint(box, [inv.noStronghold ? "the stronghold's +1 is ignored" : "",
+          inv.bonus ? `+${inv.bonus} on your highest die` : ""].filter(Boolean).join(" · ") + " for this invasion.");
+      }
+      const cards = quickRow(box);
+      (game.adventureHand || []).forEach((card, slot) => {
+        if (PAIR_CARDS.includes(card.effect) && (legal.playableAdventure || []).includes(slot) &&
+            pairCardFits(card.effect, from, to)) {
+          addButton(cards, `Play ${card.title}`, () => act("play_card", { card: slot, from, to }), "secondary");
+        }
+      });
+      const mine = game.players[game.you];
+      if (legal.canOathbreakers && mine && mine.oathbreakers > 0) {
+        addButton(cards, `Send ${mine.oathbreakers} Oathbreakers`, () => act("oathbreakers", { t: from }), "secondary");
+      }
     }
     const done = addButton(box, "Done attacking", () => act("done_attack", {}), "secondary");
     done.dataset.confirm = "1";
@@ -1965,33 +2522,33 @@ function renderActions() {
     const pending = game.pending || {};
     addHint(box, `Move ${pending.min}–${pending.max} armies into ${mapName(pending.to)}.`);
     addLeaderToggle(box, pending.from, pending.to);
-    const moveMin = addButton(box, `Move ${pending.min}`, () => act("move_in", {
-      from: pending.from, to: pending.to, count: pending.min,
+    const move = (count) => act("move_in", {
+      from: pending.from, to: pending.to, count,
       leader: state.bringLeader ? 1 : 0
-    }));
-    if (pending.max !== pending.min) {
-      const moveMax = addButton(box, `Move ${pending.max}`, () => act("move_in", {
-        from: pending.from, to: pending.to, count: pending.max,
-        leader: state.bringLeader ? 1 : 0
-      }));
-      moveMax.dataset.confirm = "1";
-    } else {
-      moveMin.dataset.confirm = "1";
-    }
+    });
+    countPicker(box, { min: pending.min, max: pending.max, initial: pending.max, verb: "Move", onPick: move });
+    if (pending.max > pending.min) addButton(quickRow(box), `Min (${pending.min})`, () => move(pending.min), "secondary");
     return;
   }
   if (game.phase === "fortify") {
     if (!game.flags.fortified && state.selectedFrom !== null && state.selectedTo !== null) {
       const max = Math.max(1, game.territories[state.selectedFrom].armies - 1);
       addHint(box, `Move armies from ${mapName(state.selectedFrom)} to ${mapName(state.selectedTo)}.`);
-      addLeaderToggle(box, state.selectedFrom, state.selectedTo);
-      for (const count of [...new Set([1, Math.floor(max / 2), max])].filter((n) => n >= 1 && n <= max)) {
-        addButton(box, String(count), () => act("fortify", {
-          from: state.selectedFrom, to: state.selectedTo, count,
-          leader: state.bringLeader ? 1 : 0
-        }));
+      const route = (legal.fortifies || []).find((f) => f.from === state.selectedFrom && f.to === state.selectedTo);
+      if (route && route.needsLeader) {
+        state.bringLeader = true;
+        addHint(box, "A blocked bridge is on the way: the Leader goes along.");
       }
-      addButton(box, "Clear", () => {
+      addLeaderToggle(box, state.selectedFrom, state.selectedTo);
+      const from = state.selectedFrom;
+      const to = state.selectedTo;
+      const fortify = (count) => act("fortify", {
+        from, to, count, leader: state.bringLeader ? 1 : 0
+      });
+      countPicker(box, { min: 1, max, initial: max, verb: "Move", onPick: fortify });
+      const quick = quickRow(box);
+      if (max > 1) addButton(quick, "1", () => fortify(1), "secondary");
+      addButton(quick, "Clear", () => {
         state.selectedFrom = state.selectedTo = null;
         renderGame();
       }, "secondary");
@@ -2197,12 +2754,83 @@ function missionProgress(card) {
   return null;
 }
 
+/* Printed cards (PLAN.md 10b) -------------------------------------------- */
+const DEFENDER_CARDS = ["DEFENSE_BONUS", "REROLL", "CANCEL_EVENT",
+  "INVADED_REINFORCE", "WITHDRAW", "STORM_REPEL"];
+const PAIR_CARDS = ["AMBUSH", "GRIMA", "NO_STRONGHOLD", "SEABORNE_BONUS"];
+
+function cardMeta(card) {
+  const meta = state.mapMeta;
+  return meta && meta.adventureCards ? meta.adventureCards.find((c) => c.id === card.id) : null;
+}
+
+function cardArt(card) {
+  const meta = cardMeta(card);
+  return meta && meta.image ? `/maps/${encodeURIComponent(state.mapPack)}/${meta.image}` : null;
+}
+
+function showCardArt(url, title) {
+  const viewer = $("card-viewer");
+  const img = viewer.querySelector("img");
+  img.src = url;
+  img.alt = title;
+  viewer.classList.remove("hidden");
+}
+
+function mySide() {
+  const game = state.game;
+  return game && game.you >= 0 && game.players[game.you] ? game.players[game.you].side : "";
+}
+
+function missionReward(card) {
+  const args = card.args || {};
+  const amount = mySide() === "evil" ? args.evil : args.good;
+  switch (args.reward) {
+    case "region": return `${amount} battalions anywhere in ${args.region}`;
+    case "territory": return `${amount} battalions in ${args.territory}`;
+    case "port": return `${amount} battalions in any 1 port`;
+    case "any": return `${amount} battalions in any territory`;
+    case "card": return "an extra Territory card at the end of the turn";
+    case "oathbreakers": return `${amount} Oathbreakers for a later invasion`;
+    default: return "";
+  }
+}
+
+function isSeaborne(from, to) {
+  const meta = state.mapMeta;
+  if (!meta || !meta.territories[from]) return false;
+  if ((meta.territories[from].adjacent || []).includes(to)) return false;
+  return (meta.links || []).some((l) => (l.a === from && l.b === to) || (l.a === to && l.b === from));
+}
+
+function sameRange(a, b) {
+  return ((state.mapMeta && state.mapMeta.mountains) || []).some((r) =>
+    r.territories.includes(a) && r.territories.includes(b));
+}
+
+/* Whether a pair card fits the invasion selected on the map. */
+function pairCardFits(effect, from, to) {
+  const game = state.game;
+  const meta = state.mapMeta;
+  if (from === null || to === null || !attackPair(from, to)) return false;
+  if (effect === "GRIMA") return game.territories[to].armies >= 2;
+  if (effect === "NO_STRONGHOLD") return !!meta.territories[to].stronghold;
+  if (effect === "SEABORNE_BONUS") return isSeaborne(from, to);
+  return true;
+}
+
+function bridgeName(index) {
+  const bridge = ((state.mapMeta && state.mapMeta.bridges) || [])[index];
+  return bridge ? `${mapName(bridge.a)} – ${mapName(bridge.b)}` : `bridge ${index}`;
+}
+
 function addStandingSelect(parent, card, index) {
   const select = document.createElement("select");
   const options = card.effect === "CANCEL_EVENT"
     ? [[0, 0, "Set order: never"], [1, 0, "Cancel any event"]]
-    : [[0, 0, "Set order: never"], [1, 0, "On a stronghold"],
-       [2, 2, "≥2 attack dice"], [2, 3, "≥3 attack dice"]];
+    : [[0, 0, "Use: never"], [2, 1, "Use: whenever attacked"],
+       [1, 0, "Use: on a stronghold"],
+       [2, 2, "Use: vs ≥2 attack dice"], [2, 3, "Use: vs 3 attack dice"]];
   const current = `${card.auto || 0}:${card.autoN || 0}`;
   let matched = false;
   for (const [mode, n, label] of options) {
@@ -2239,6 +2867,20 @@ async function playAdventure(index, effect) {
     renderGame();
     return;
   }
+  if (PAIR_CARDS.includes(effect)) {
+    if (!pairCardFits(effect, state.selectedFrom, state.selectedTo)) {
+      toast("Select the invasion on the map first (your territory, then the target).", true);
+      return;
+    }
+    await act("play_card", { card: index, from: state.selectedFrom, to: state.selectedTo });
+    return;
+  }
+  if (effect === "MOUNTAIN_PASS" || effect === "LEADER_MOVE") {
+    state.cardPlay = { slot: index, effect, from: null };
+    state.selectedFrom = state.selectedTo = null;
+    renderGame();
+    return;
+  }
   await act("play_card", { card: index });
 }
 
@@ -2265,8 +2907,22 @@ function renderAdventure() {
   if (game.adventureHand.length === 0) {
     const note = document.createElement("p");
     note.className = "small muted";
-    note.textContent = "No adventure cards yet. End a turn with a leader on a site of power to draw one.";
+    note.textContent = "No adventure cards. Conquer a Site of Power with a Leader to draw one at the end of your turn.";
     box.append(note);
+  }
+  const printed = game.printed || {};
+  if (printed.uprising >= 0) {
+    const secret = document.createElement("p");
+    secret.className = "small adv-progress";
+    secret.textContent = `Local Uprising (secret): +4 battalions when you control ${mapName(printed.uprising)}.`;
+    box.append(secret);
+  }
+  const mine = game.players[game.you];
+  if (mine && mine.oathbreakers > 0) {
+    const oath = document.createElement("p");
+    oath.className = "small adv-progress";
+    oath.textContent = `${mine.oathbreakers} Oathbreakers wait to join one of your invasions.`;
+    box.append(oath);
   }
   game.adventureHand.forEach((card, index) => {
     const tile = document.createElement("div");
@@ -2280,8 +2936,28 @@ function renderAdventure() {
     const text = document.createElement("div");
     text.className = "adv-text";
     text.textContent = card.text;
+    const art = cardArt(card);
+    if (art) {
+      const thumb = document.createElement("img");
+      thumb.className = "adv-art";
+      thumb.src = art;
+      thumb.alt = card.title;
+      thumb.loading = "lazy";
+      thumb.title = "Show the card";
+      thumb.addEventListener("click", () => showCardArt(art, card.title));
+      tile.append(thumb);
+    }
     tile.append(kind, title, text);
-    if (card.kind === "mission") {
+    if (card.effect === "SITE_MISSION") {
+      const site = (card.args || {}).site;
+      const at = territoryIndex(site);
+      const there = at >= 0 && game.territories[at].owner === game.you &&
+        game.territories[at].leader === game.you + 1;
+      const line = document.createElement("div");
+      line.className = "adv-progress";
+      line.textContent = `${there ? "Leader at" : "Bring a Leader to"} ${site} · reward: ${missionReward(card)}`;
+      tile.append(line);
+    } else if (card.kind === "mission") {
       const progress = missionProgress(card);
       if (progress) {
         const line = document.createElement("div");
@@ -2294,9 +2970,21 @@ function renderAdventure() {
     actions.className = "adv-actions";
     if (mustDiscard) {
       addButton(actions, "Discard", () => discardAdventure(index), "secondary tiny");
+    } else if ((legal.claimableMissions || []).includes(index)) {
+      addButton(actions, "Complete mission", () => act("claim_mission", { card: index }), "tiny");
     } else if (card.kind === "power") {
-      if (["DEFENSE_BONUS", "REROLL", "CANCEL_EVENT"].includes(card.effect)) {
+      if (DEFENDER_CARDS.includes(card.effect)) {
         addStandingSelect(actions, card, index);
+      } else if (card.effect === "BRIDGE_BLOCK" && playable.includes(index)) {
+        const pick = document.createElement("select");
+        ((state.mapMeta && state.mapMeta.bridges) || []).forEach((bridge, b) => {
+          const option = document.createElement("option");
+          option.value = String(b);
+          option.textContent = bridgeName(b);
+          pick.append(option);
+        });
+        actions.append(pick);
+        addButton(actions, "Block", () => act("play_card", { card: index, bridge: Number(pick.value) }), "tiny");
       } else if (playable.includes(index)) {
         addButton(actions, "Play", () => playAdventure(index, card.effect), "tiny");
       }
@@ -2374,12 +3062,40 @@ function renderMap() {
     if (game.phase === "setup_place" && legal.batchRemaining > 0) legal.placeable.forEach((t) => selectable.add(t));
     if (game.phase === "reinforce" && legal.reinforcementsPending > 0) legal.placeable.forEach((t) => selectable.add(t));
     if (game.phase === "setup_leaders") legal.leaderPlaceable.forEach((t) => selectable.add(t));
-    if (game.phase === "attack") legal.attacks.forEach((a) => { selectable.add(a.from); selectable.add(a.to); });
-    if (game.phase === "fortify") legal.fortifies.forEach((f) => { selectable.add(f.from); selectable.add(f.to); });
-    if (state.pendingLeader) legal.recruitPlaceable.forEach((t) => selectable.add(t));
+    /* Before a source is chosen only sources glow; afterwards only its targets. */
+    if (game.phase === "attack") {
+      legal.attacks.forEach((a) => {
+        if (state.selectedFrom === null) selectable.add(a.from);
+        else if (a.from === state.selectedFrom) selectable.add(a.to);
+      });
+    }
+    if (game.phase === "fortify" && !(game.flags && game.flags.fortified)) {
+      legal.fortifies.forEach((f) => {
+        if (state.selectedFrom === null) selectable.add(f.from);
+        else if (f.from === state.selectedFrom) selectable.add(f.to);
+      });
+    }
+    if (state.pendingLeader) {
+      selectable.clear();
+      legal.recruitPlaceable.forEach((t) => selectable.add(t));
+    }
+    const printed = game.printed || {};
+    const override = legal.freeLeaderPending ? legal.leaderPlaceable
+      : printed.bonus > 0 ? (legal.bonusPlaceable || [])
+      : state.cardPlay ? cardPlayTargets() : null;
+    if (override) {
+      selectable.clear();
+      override.forEach((t) => selectable.add(t));
+    }
   }
   const territoryCount = Math.min(game.territories.length, meta.territories.length);
   const last = state.replayActive ? [] : lastActionTerritories(game);
+  const source = state.selectedFrom !== null ? state.selectedFrom
+    : state.pendingPlace ? state.pendingPlace.territory : state.replayFrom;
+  const target = state.selectedTo !== null ? state.selectedTo : state.replayTo;
+  state.svg.querySelectorAll("#hit-areas .hit").forEach((cell) => {
+    cell.classList.toggle("selectable", selectable.has(Number(cell.getAttribute("data-t"))));
+  });
   for (let i = 0; i < territoryCount; i++) {
     const path = state.svg.querySelector(`#t${i}`);
     if (!path) continue;
@@ -2395,14 +3111,12 @@ function renderMap() {
     }
     path.style.fill = fill;
     path.style.fillOpacity = String(opacity);
-    const source = state.selectedFrom !== null ? state.selectedFrom : state.replayFrom;
-    const target = state.selectedTo !== null ? state.selectedTo : state.replayTo;
     path.classList.toggle("selectable", selectable.has(i));
     path.classList.toggle("source", source === i);
     path.classList.toggle("target", target === i);
     path.classList.toggle("last-action", last.includes(i));
   }
-  renderBadges();
+  renderBadges({ selectable, source, target });
 }
 
 /* Territories an event points at; single-territory events only fill `to`. */
@@ -2426,63 +3140,179 @@ function lastActionTerritories(game) {
   return [];
 }
 
-function renderBadges() {
+/* Piece sprites from the pack: factions[].sprites (unit1/unit3/unit5/leader)
+ * plus pieces/stronghold.svg and pieces/site.svg by convention.  Each file is
+ * copied once into the board's <defs> as a <symbol> (shape elements only, no
+ * scripts or links) and drawn with <use>; the sprites paint with currentColor,
+ * so one set serves every faction colour. */
+const PIECE_SHAPES = new Set(["g", "path", "circle", "ellipse", "rect", "polygon", "polyline", "line"]);
+const MARKER_SPRITES = { stronghold: "pieces/stronghold.svg", site: "pieces/site.svg" };
+
+function copyShapes(source, target) {
+  for (const child of source.children) {
+    if (!PIECE_SHAPES.has(child.localName)) continue;
+    const copy = document.createElementNS(NS, child.localName);
+    for (const attribute of child.attributes) {
+      if (/^on/i.test(attribute.name) || /href$/i.test(attribute.name)) continue;
+      copy.setAttribute(attribute.name, attribute.value);
+    }
+    copyShapes(child, copy);
+    target.append(copy);
+  }
+}
+
+async function loadPieces(svg, meta, pack) {
+  const files = new Set(Object.values(MARKER_SPRITES));
+  for (const faction of (meta && meta.factions) || []) {
+    for (const file of Object.values(faction.sprites || {})) {
+      if (typeof file === "string") files.add(file);
+    }
+  }
+  const defs = svg.querySelector("defs") ||
+    svg.insertBefore(document.createElementNS(NS, "defs"), svg.firstChild);
+  const symbols = {};
+  let next = 0;
+  await Promise.all([...files].map(async (file) => {
+    if (!/^[A-Za-z0-9_][A-Za-z0-9_./-]*\.svg$/.test(file) || file.includes("..")) return;
+    try {
+      const response = await fetch(`/maps/${encodeURIComponent(pack)}/${file}`);
+      if (!response.ok) return;
+      const doc = new DOMParser().parseFromString(await response.text(), "image/svg+xml");
+      const root = doc.documentElement;
+      if (doc.querySelector("parsererror") || root.localName !== "svg") return;
+      const symbol = document.createElementNS(NS, "symbol");
+      const id = `frisk-piece-${next++}`;
+      symbol.setAttribute("id", id);
+      symbol.setAttribute("viewBox", root.getAttribute("viewBox") ||
+        `0 0 ${root.getAttribute("width") || 24} ${root.getAttribute("height") || 24}`);
+      copyShapes(root, symbol);
+      defs.append(symbol);
+      symbols[file] = id;
+    } catch (error) { /* missing sprite: a text glyph is drawn instead */ }
+  }));
+  return symbols;
+}
+
+/* Greedy 5/3/1 split for the army tokens, at most five tokens; `more` marks a
+ * stack too big to show (the number badge is always exact). */
+function armyTokens(count) {
+  const tokens = [];
+  let left = count;
+  for (const size of [5, 3, 1]) {
+    while (left >= size && tokens.length < 5) {
+      tokens.push(size);
+      left -= size;
+    }
+  }
+  return { tokens, more: left > 0 };
+}
+
+function svgNode(tag, attributes) {
+  const node = document.createElementNS(NS, tag);
+  for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, String(value));
+  return node;
+}
+
+function drawPiece(layer, file, x, y, size, colour, fallback) {
+  const id = file && state.pieceSymbols ? state.pieceSymbols[file] : null;
+  if (id) {
+    const use = svgNode("use", { href: `#${id}`, x, y, width: size, height: size, class: "piece" });
+    use.style.color = colour;
+    layer.append(use);
+  } else if (fallback) {
+    const glyph = svgNode("text", {
+      x: x + size / 2, y: y + size * 0.8, "text-anchor": "middle", "font-size": size,
+      fill: colour, stroke: "#160f08", "stroke-width": 1
+    });
+    glyph.textContent = fallback;
+    layer.append(glyph);
+  }
+}
+
+/* Three layers so a neighbour's pieces never cover an army number:
+ * selection rings, then pieces and markers, then the number badges. */
+function renderBadges(marks) {
   const group = state.badges;
   const game = state.game;
   const meta = state.mapMeta;
   if (!group || !game || !meta) return;
-  group.replaceChildren();
+  const rings = svgNode("g", { class: "layer-rings" });
+  const pieces = svgNode("g", { class: "layer-pieces" });
+  const numbers = svgNode("g", { class: "layer-numbers" });
+  group.replaceChildren(rings, pieces, numbers);
+  const sprites = (faction) => (((meta.factions || [])[faction] || {}).sprites) || {};
+  const printed = game.printed || {};
+  const frozenSet = new Set((printed.frozen || []).map(([t]) => t));
+  for (const [b] of printed.blockedBridges || []) {
+    const bridge = (meta.bridges || [])[b];
+    if (!bridge) continue;
+    const [ax, ay] = meta.territories[bridge.a].label;
+    const [bx, by] = meta.territories[bridge.b].label;
+    const block = svgNode("text", { x: (ax + bx) / 2, y: (ay + by) / 2 + 6, "text-anchor": "middle",
+      "font-size": 18, "font-weight": 700, fill: "#ff5a3d", stroke: "#160f08", "stroke-width": 1.2 });
+    block.textContent = "⛔";
+    rings.append(block);
+  }
   const count = Math.min(game.territories.length, meta.territories.length);
   for (let i = 0; i < count; i++) {
     const territory = game.territories[i];
-    const label = meta.territories[i].label;
-    if (!label) continue;
-    if (!territory.neutral && territory.owner < 0) continue;
-    const x = label[0];
-    const y = label[1];
-    const colour = territory.neutral ? "#8a8a8a" : factionHex(territory.owner);
-    const circle = document.createElementNS(NS, "circle");
-    circle.setAttribute("cx", String(x));
-    circle.setAttribute("cy", String(y));
-    circle.setAttribute("r", "13");
-    circle.setAttribute("fill", colour);
-    circle.setAttribute("fill-opacity", "0.94");
-    circle.setAttribute("stroke", "#160f08");
-    circle.setAttribute("stroke-width", "2");
-    group.append(circle);
-    const text = document.createElementNS(NS, "text");
-    text.setAttribute("x", String(x));
-    text.setAttribute("y", String(y + 4.5));
-    text.setAttribute("text-anchor", "middle");
-    text.setAttribute("font-size", "13");
-    text.setAttribute("font-weight", "700");
-    text.setAttribute("fill", "#fff7e8");
-    text.setAttribute("font-family", "system-ui, sans-serif");
-    text.textContent = String(territory.armies);
-    group.append(text);
-    if (territory.leader) {
-      const star = document.createElementNS(NS, "text");
-      star.setAttribute("x", String(x + 13));
-      star.setAttribute("y", String(y - 10));
-      star.setAttribute("font-size", "15");
-      star.setAttribute("fill", "#ffe08a");
-      star.setAttribute("stroke", "#160f08");
-      star.setAttribute("stroke-width", "1");
-      star.textContent = "★";
-      group.append(star);
-    }
     const def = meta.territories[i];
-    if (def.stronghold || def.site) {
-      const marker = document.createElementNS(NS, "text");
-      marker.setAttribute("x", String(x - 19));
-      marker.setAttribute("y", String(y - 10));
-      marker.setAttribute("font-size", "13");
-      marker.setAttribute("fill", def.site ? "#ffe08a" : "#d8c9a0");
-      marker.setAttribute("stroke", "#160f08");
-      marker.setAttribute("stroke-width", "1");
-      marker.textContent = def.site ? "✦" : "⌂";
-      group.append(marker);
+    const label = def.label;
+    if (!label) continue;
+    const [x, y] = label;
+    const ring = marks && (i === marks.source ? "source" : i === marks.target ? "target"
+      : marks.selectable.has(i) ? "selectable" : "");
+    if (ring) {
+      /* The army counter is the most visible part of a territory, so it
+       * carries the "you can click this" cue too.  A dark halo under a light
+       * ring keeps it readable on parchment and on every faction colour. */
+      for (const part of ["ring-halo", `ring ${ring}`]) {
+        rings.append(svgNode("circle", { cx: x, cy: y, r: 19, class: part }));
+      }
     }
+    /* Strongholds and sites are shown even before a territory is claimed. */
+    const markers = [];
+    if (def.stronghold) markers.push(["stronghold", "#d8c9a0", "⌂"]);
+    if (def.site) markers.push(["site", "#ffe08a", "✦"]);
+    markers.forEach(([kind, colour, glyph], index) => {
+      drawPiece(pieces, MARKER_SPRITES[kind], x - 31, y - 29 + index * 17, 16, colour, glyph);
+    });
+    if (!territory.neutral && territory.owner < 0) continue;
+    const colour = territory.neutral ? "#8a8a8a" : factionHex(territory.owner);
+    const set = sprites(territory.neutral ? 0 : playerFaction(territory.owner));
+    const { tokens, more } = armyTokens(territory.armies);
+    /* Tokens overlap like a small stack so dense areas stay readable. */
+    tokens.forEach((size, index) => {
+      drawPiece(pieces, set[`unit${size}`], x + 13 + index * 6, y - 8, 16, colour, null);
+    });
+    if (more && state.pieceSymbols && set.unit5 && state.pieceSymbols[set.unit5]) {
+      const plus = svgNode("text", {
+        x: x + 13 + tokens.length * 6 + 12, y: y + 4, "font-size": 12, "font-weight": 700,
+        fill: "#fff7e8", stroke: "#160f08", "stroke-width": 0.8
+      });
+      plus.textContent = "+";
+      pieces.append(plus);
+    }
+    if (territory.leader) {
+      const seat = territory.leader - 1;
+      drawPiece(pieces, sprites(playerFaction(seat)).leader, x + 4, y - 32, 19,
+        factionHex(seat), "★");
+    }
+    if (frozenSet.has(i)) {
+      const flake = svgNode("text", { x: x - 6, y: y + 30, "font-size": 15, fill: "#bfe6ff",
+        stroke: "#0b2233", "stroke-width": 1, class: "frozen-mark" });
+      flake.textContent = "❄";
+      pieces.append(flake);
+    }
+    numbers.append(svgNode("circle", {
+      cx: x, cy: y, r: 13, fill: colour, "fill-opacity": 0.94, stroke: "#160f08", "stroke-width": 2
+    }));
+    const text = svgNode("text", {
+      x, y: y + 4.5, "text-anchor": "middle", "font-size": 13, "font-weight": 700,
+      fill: "#fff7e8", "font-family": "system-ui, sans-serif"
+    });
+    text.textContent = String(territory.armies);
+    numbers.append(text);
   }
 }
 
@@ -2761,6 +3591,10 @@ async function pollChat(view, force) {
       if (!Number.isFinite(id) || view.seen.has(id)) continue;
       view.seen.add(id);
       renderChatMessage(view, message, wasLoaded);
+      if (wasLoaded && view === chatViews.game && message.kind !== "system" &&
+          message.user !== (state.me && state.me.user) && !tabVisible("chat")) {
+        tabs.chatUnread++;
+      }
     }
     if (Number.isFinite(Number(result.last))) {
       view.lastId = Math.max(view.lastId, Number(result.last));
@@ -2768,6 +3602,7 @@ async function pollChat(view, force) {
     view.loaded = true;
     view.at = Date.now();
     updateChatControls(view);
+    if (view === chatViews.game) updateTabBadges();
   } finally {
     view.loading = false;
   }
@@ -2826,6 +3661,8 @@ async function sendChatClip(view, blob, name, durationMs) {
 function typingTarget(target) {
   if (!target) return false;
   const tag = target.tagName;
+  /* A focused slider or checkbox still lets Enter confirm the action. */
+  if (tag === "INPUT" && (target.type === "range" || target.type === "checkbox")) return false;
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
     target.isContentEditable;
 }
@@ -2846,10 +3683,16 @@ document.addEventListener("keydown", (event) => {
       finishReplay();
       return;
     }
+    if (tabs.open && dockLayout()) {
+      tabs.open = false;
+      applyTabs();
+      return;
+    }
     state.selectedFrom = null;
     state.selectedTo = null;
     state.pendingPlace = null;
     state.pendingLeader = null;
+    state.cardPlay = null;
     state.bringLeader = false;
     renderGame();
     return;
@@ -2936,7 +3779,10 @@ function cancelReplay(mark) {
   state.replayActive = false;
   state.replayFrom = null;
   state.replayTo = null;
-  $("replay-bar").classList.add("hidden");
+  if (!$("replay-bar").classList.contains("hidden")) {
+    $("replay-bar").classList.add("hidden");
+    refitIfFitted();
+  }
   if (mark) markSeen();
 }
 
@@ -2963,6 +3809,7 @@ async function maybeStartReplay(gameData) {
   state.replayTo = null;
   $("replay-speed").textContent = "1×";
   $("replay-bar").classList.remove("hidden");
+  refitIfFitted();
   hideDice();
   renderEndBanner();
   renderActions();
@@ -3027,6 +3874,10 @@ function turnNotification(title, body, tag) {
   try {
     new Notification(title, { body, tag, renotify: false });
   } catch (error) { /* notifications can fail on insecure origins */ }
+}
+
+function isMyTurn(game) {
+  return !!(game && game.status === "running" && game.you >= 0 && game.current === game.you);
 }
 
 function maybeNotifyTurn() {

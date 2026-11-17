@@ -105,6 +105,11 @@ summary { cursor: pointer; color: var(--accent); }
 .replay-bar .replay-label { color: var(--ink); font-size: .86rem; }
 .replay-bar .spacer { flex: 1; }
 .game-body { display: flex; gap: 14px; align-items: stretch; min-height: 70vh; }
+/* In a game the page is exactly one viewport tall: map and side column fill it. */
+body.in-game { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+body.in-game main { flex: 1 1 auto; min-height: 0; display: flex; margin: 12px auto; }
+body.in-game #game-view { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+body.in-game .game-body { flex: 1 1 auto; min-height: 0; }
 .map-panel {
   flex: 1 1 auto; min-width: 0; background: #0d0a07;
   border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
@@ -115,20 +120,105 @@ summary { cursor: pointer; color: var(--accent); }
 #map-stage { position: absolute; left: 0; top: 0; transform-origin: 0 0; width: 1088px; height: 1600px; }
 #map-stage svg { width: 1088px; height: 1600px; display: block; }
 #map-stage .territory { transition: fill-opacity .15s ease, stroke .12s ease; }
-#map-stage .territory.selectable { cursor: pointer; stroke: #f4dc8b !important; stroke-width: 2.6 !important; stroke-opacity: .95 !important; }
-#map-stage .territory.source { stroke: #ffcf3f !important; stroke-width: 4 !important; stroke-opacity: 1 !important; }
-#map-stage .territory.target { stroke: #ff7c58 !important; stroke-width: 4 !important; stroke-opacity: 1 !important; }
+#map-stage .territory.selectable { cursor: pointer; stroke: #ffffff !important; stroke-width: 2.6 !important; stroke-opacity: .95 !important; }
+#map-stage .territory.source { stroke: #4fd1ff !important; stroke-width: 4 !important; stroke-opacity: 1 !important; }
+#map-stage .territory.target { stroke: #ff6a3d !important; stroke-width: 4 !important; stroke-opacity: 1 !important; }
 #map-stage #badges { pointer-events: none; }
 .map-tools { position: absolute; right: 8px; top: 8px; display: flex; gap: 6px; z-index: 3; }
 .side {
   flex: 0 0 340px; display: flex; flex-direction: column; gap: 10px;
-  max-height: calc(70vh + 46px); overflow: auto;
+  min-height: 0; position: relative;
 }
 .side .panel { padding: 14px; }
-@media (max-width: 1000px) {
-  .game-body { flex-direction: column; min-height: 0; }
-  .map-panel { height: 58vh; flex: none; }
-  .side { flex: none; max-height: none; }
+.side .action-panel { flex: none; max-height: 48%; overflow: auto; }
+.side-tabs { display: flex; gap: 4px; flex: none; }
+.side-tabs .tab {
+  flex: 1 1 0; min-height: 38px; padding: 4px 6px; font-size: .84rem; font-weight: 600;
+  background: var(--panel); color: var(--muted); border-color: var(--line);
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+}
+.side-tabs .tab.active { color: var(--accent); border-color: var(--accent); background: var(--panel-2); }
+.tab-badge {
+  min-width: 18px; padding: 0 5px; border-radius: 999px; font-size: .68rem; line-height: 17px;
+  background: rgba(236,219,180,.18); color: var(--ink);
+}
+.tab-badge.urgent { background: var(--accent); color: #1b1306; }
+.tab-sheet { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.tab-panel { display: none; flex: 1 1 auto; min-height: 0; overflow: auto; }
+.tab-panel.active { display: block; }
+.tab-panel h2.sub { margin-top: 16px; }
+.tab-panel .log { max-height: none; }
+.tab-panel .chat-log { max-height: 46vh; }
+/* Narrow screens without the portrait dock (landscape phones): slimmer column. */
+@media (max-width: 999px) {
+  body.in-game main { width: 100%; margin: 0; }
+  body.in-game .game-head { padding: 6px 10px; margin: 0; gap: 8px; }
+  body.in-game .replay-bar { margin: 0 8px 6px; padding: 5px 9px; }
+  .game-body { gap: 0; min-height: 0; }
+  .map-panel { border-radius: 0; border-left: 0; border-right: 0; }
+  .side { flex-basis: 290px; gap: 6px; padding: 6px; background: rgba(12, 9, 6, .96); border-left: 1px solid var(--line); }
+  .side .panel { padding: 9px; }
+  .side .phase-bar { display: none; }
+  body.in-game #game-status { display: none; }
+  body.in-game .game-head .gname { font-size: 1rem; }
+  body.in-game .game-head .phase { font-size: .84rem; }
+  body.in-game .replay-bar { flex-wrap: nowrap; }
+  body.in-game .replay-bar .spacer { display: none; }
+  body.in-game .replay-bar button { white-space: nowrap; }
+  body.in-game .replay-bar .replay-label {
+    flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .actions { flex-direction: row; flex-wrap: wrap; gap: 6px; }
+  .actions > p, .actions > div, .actions > label { flex-basis: 100%; margin: 0; }
+  .actions button { min-height: 44px; }
+}
+/* Portrait phones and tablets: map fills the screen, controls dock at the
+ * bottom and a tab opens as a slide-up sheet over the map. */
+@media (max-width: 999px) and (orientation: portrait) {
+  .game-body { flex-direction: column; }
+  .map-panel { flex: 1 1 auto; min-height: 0; }
+  .side {
+    flex: none; border-left: 0; border-top: 1px solid var(--line); z-index: 6;
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+  }
+  .side .action-panel {
+    max-height: 32dvh; padding: 4px 2px; border: 0; box-shadow: none; background: transparent;
+  }
+  .side-tabs .tab { min-height: 44px; }
+  .tab-sheet {
+    display: none; position: absolute; left: 0; right: 0; bottom: 100%;
+    max-height: 62dvh; overflow: auto; padding: 8px;
+    background: rgba(12, 9, 6, .97); border-top: 1px solid var(--accent);
+    border-radius: 14px 14px 0 0; box-shadow: 0 -14px 34px rgba(0, 0, 0, .55);
+  }
+  .side.sheet-open .tab-sheet { display: block; }
+  .tab-panel { box-shadow: none; overflow: visible; }
+  .tab-panel .chat-log { max-height: 34dvh; }
+}
+/* Landscape phones: every pixel of height goes to the map. */
+@media (max-height: 500px) and (orientation: landscape) {
+  body.in-game .topbar { display: none; }
+  body.in-game .game-head { padding: 4px 8px; }
+  body.in-game .game-head button.tiny { min-height: 28px; }
+}
+@media (max-width: 600px) and (orientation: portrait) {
+  /* The top bar already has a Lobby button; keep the game header on one row. */
+  body.in-game #back-to-lobby, body.in-game .game-head .spacer { display: none; }
+  body.in-game .game-head { flex-wrap: nowrap; }
+  body.in-game .game-head .gname, body.in-game .game-head .phase {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  body.in-game .game-head .gname { flex: 0 1 auto; }
+  body.in-game .game-head #game-turn { flex: 1 1 auto; }
+  body.in-game .game-head #game-msg:empty { display: none; }
+  body.in-game .game-head #resign-game { flex: none; }
+}
+@media (max-width: 600px) {
+  .topbar { gap: 8px; padding: 6px 10px; }
+  .topbar .who, #top-admin { display: none; }
+  .brand { letter-spacing: .1em; }
+  main { width: calc(100% - 20px); margin-top: 12px; }
+  .lobby-head h1 { font-size: 1.3rem; }
 }
 .phase-bar {
   display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
@@ -144,8 +234,9 @@ summary { cursor: pointer; color: var(--accent); }
 .player-row .detail { color: var(--muted); font-size: .78rem; }
 .player-row .kick {
   min-height: 24px; padding: 1px 7px; font-size: .72rem;
-  border-color: rgba(224,123,106,.4); color: var(--bad); background: transparent;
+  border-color: var(--line); color: var(--muted); background: transparent; font-weight: 500;
 }
+.player-row .kick:hover, .player-row .kick:focus-visible { color: var(--bad); border-color: rgba(224,123,106,.5); }
 .kick-vote {
   border: 1px solid rgba(224,123,106,.4); border-radius: 8px;
   padding: 7px 9px; margin-top: 8px; font-size: .8rem; color: var(--muted);
@@ -261,11 +352,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   }
 }
 /* last action, dice overlay, end banner, faction picker, history */
-#map-stage .territory.last-action { stroke: #8fd3ff; stroke-width: 3; stroke-dasharray: 7 5; stroke-opacity: .95; }
+#map-stage .territory.last-action { stroke: #c792ff; stroke-width: 3; stroke-dasharray: 7 5; stroke-opacity: .95; }
 .dice-overlay {
   position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 4;
   display: flex; flex-direction: column; gap: 8px; align-items: center;
-  padding: 12px 16px; border-radius: 12px; cursor: pointer;
+  padding: 12px 16px; border-radius: 12px;
+  /* Informational only: clicks go through to the map (it covered the south of
+   * the board for 3 s after every attack and swallowed the next click). */
+  pointer-events: none;
   background: rgba(17, 13, 9, .94); border: 1px solid rgba(217, 178, 58, .5);
   box-shadow: var(--shadow); max-width: calc(100% - 24px);
 }
@@ -317,3 +411,44 @@ label.check input { width: auto; }
 .history li { padding: 6px 0; border-bottom: 1px solid var(--line); }
 .history .won { color: var(--good); }
 .history .lost { color: var(--bad); }
+/* map hit areas, hover and badge rings */
+#map-stage .hit { fill: transparent; stroke: none; }
+#map-stage .hit.selectable { cursor: pointer; }
+#map-stage .territory.hover { stroke: #fff7e8 !important; stroke-width: 3 !important; stroke-opacity: 1 !important; }
+/* Rings keep a fixed on-screen width at any zoom (non-scaling stroke), and use
+ * colours no faction uses (white, cyan, orange). */
+#map-stage .ring, #map-stage .ring-halo { fill: none; vector-effect: non-scaling-stroke; }
+#map-stage .ring-halo { stroke: #160f08; stroke-width: 6; stroke-opacity: .75; }
+#map-stage .ring { stroke-width: 3; }
+#map-stage .ring.selectable { stroke: #ffffff; animation: ring-pulse 1.4s ease-in-out infinite; }
+#map-stage .ring.source { stroke: #4fd1ff; stroke-width: 4; }
+#map-stage .ring.target { stroke: #ff6a3d; stroke-width: 4; }
+@keyframes ring-pulse { 0%, 100% { stroke-opacity: 1; } 50% { stroke-opacity: .3; } }
+.actions .quick { display: flex; gap: 6px; flex-wrap: wrap; }
+.actions .quick button { flex: 1 1 0; min-width: 64px; }
+.actions .quick select { flex: 1 1 0; width: auto; min-width: 96px; padding: 8px; }
+.count-picker { display: flex; gap: 8px; align-items: center; }
+.count-picker input[type=range] { flex: 1 1 auto; min-width: 0; }
+.count-picker button { flex: none; min-width: 104px; }
+/* territory info chip, regions, touch-sized map tools */
+.territory-info {
+  position: absolute; left: 10px; top: 10px; z-index: 4; pointer-events: none;
+  max-width: min(300px, calc(100% - 150px)); padding: 8px 11px; border-radius: 10px;
+  background: rgba(17, 13, 9, .93); border: 1px solid var(--line); box-shadow: var(--shadow);
+  font-size: .84rem; line-height: 1.4;
+}
+.territory-info .player-dot { vertical-align: -1px; }
+.regions { display: flex; flex-direction: column; }
+.region-row { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; font-size: .84rem; border-bottom: 1px solid rgba(236,219,180,.06); }
+.region-row:last-child { border-bottom: 0; }
+.region-row .detail { color: var(--muted); font-size: .78rem; white-space: nowrap; }
+.region-row.mine .rname { color: var(--accent); font-weight: 650; }
+@media (pointer: coarse) {
+  .map-tools button { min-height: 40px; min-width: 40px; font-size: .95rem; }
+}
+/* printed adventure cards */
+.adv-art { float: right; width: 58px; margin: 0 0 6px 8px; border-radius: 5px; cursor: zoom-in; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
+.adv-card::after { content: ""; display: block; clear: both; }
+.card-viewer { position: fixed; inset: 0; z-index: 120; background: rgba(0,0,0,.72); display: flex; align-items: center; justify-content: center; cursor: zoom-out; }
+.card-viewer img { max-width: min(92vw, 420px); max-height: 88vh; border-radius: 12px; box-shadow: var(--shadow); }
+.actions .effect-note { color: #bfe6ff; font-size: .8rem; }

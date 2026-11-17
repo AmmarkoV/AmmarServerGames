@@ -22,6 +22,7 @@ from the frisk directory.  It rewrites res/maps/lotr/{map.json,board.svg}.
 import json
 import math
 import os
+import shutil
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -117,42 +118,44 @@ DISPLAY = {
     "WitheredHeath": "Withered Heath",
 }
 
-# Label anchor positions on the 1088x1600 board (approx. centre of the
-# printed territory name; checked against the board art).
+# Label anchor positions on the 1088x1600 board: inside the printed territory,
+# next to its printed name.  Re-checked 2026-11-17 against board.jpg and the
+# sharper photo res/textures/map_full.jpg (31 anchors had drifted into
+# neighbouring territories, e.g. Belfalas sat in Mordor).
 LABELS = {
-    "Andrast": (455, 1265), "AnduinValley": (740, 505), "Anfalas": (650, 1245),
-    "Angmar": (620, 190), "Barad-Dur": (900, 1145), "Belfalas": (1000, 1235),
-    "Borderlands": (450, 235), "BrownLands": (785, 735), "Buckland": (398, 418),
-    "Carrock": (650, 260), "DeadMarshes": (785, 945), "DeepHarad": (1045, 1545),
-    "DruwaithIaur": (610, 1135), "Dunland": (480, 670),
+    "Andrast": (255, 1240), "AnduinValley": (740, 505), "Anfalas": (365, 1225),
+    "Angmar": (525, 168), "Barad-Dur": (995, 1190), "Belfalas": (540, 1300),
+    "Borderlands": (450, 235), "BrownLands": (888, 640), "Buckland": (398, 418),
+    "Carrock": (695, 290), "DeadMarshes": (785, 945), "DeepHarad": (655, 1550),
+    "DruwaithIaur": (305, 1170), "Dunland": (480, 670),
     "EasternAngmar": (705, 130), "EasternMirkwood": (835, 485),
-    "EmynMuil": (700, 735), "Enedwaith": (360, 645), "Eregion": (540, 575),
+    "EmynMuil": (800, 735), "Enedwaith": (455, 840), "Eregion": (540, 575),
     "Esgaroth": (880, 305), "EvendimHills": (340, 260),
-    "Fangorn": (560, 855), "Forlindon": (210, 260), "Fornost": (420, 355),
-    "Forodwaith": (655, 120), "GapOfRohan": (570, 945),
+    "Fangorn": (560, 855), "Forlindon": (122, 295), "Fornost": (420, 355),
+    "Forodwaith": (590, 95), "GapOfRohan": (570, 945),
     "GladdenFields": (700, 515), "Gorgoroth": (905, 1255),
-    "Harad": (550, 1500), "Harlindon": (230, 580), "Harondor": (605, 1365),
-    "Ithilien": (715, 1125), "Khand": (950, 1435), "Lamedon": (860, 1175),
-    "Lebennin": (685, 1185), "Lorien": (640, 685),
+    "Harad": (790, 1530), "Harlindon": (230, 580), "Harondor": (700, 1410),
+    "Ithilien": (715, 1125), "Khand": (1035, 1455), "Lamedon": (520, 1205),
+    "Lebennin": (595, 1262), "Lorien": (640, 685),
     "LuneValley": (260, 250), "MinasMorgul": (800, 1235),
-    "MinasTirith": (690, 1145), "Minhiriath": (305, 660),
-    "Mithlond": (282, 485), "Moria": (610, 565), "MountDoom": (805, 1168),
-    "NearHarad": (800, 1455), "NorthDowns": (430, 300),
-    "NorthMirkwood": (760, 260), "NorthRhun": (980, 110), "Nurn": (825, 1315),
-    "OldForest": (455, 440), "Rhudaur": (620, 300), "RhunHills": (870, 785),
+    "MinasTirith": (612, 1158), "Minhiriath": (305, 660),
+    "Mithlond": (172, 440), "Moria": (610, 565), "MountDoom": (880, 1180),
+    "NearHarad": (930, 1480), "NorthDowns": (430, 300),
+    "NorthMirkwood": (775, 300), "NorthRhun": (980, 110), "Nurn": (880, 1308),
+    "OldForest": (455, 440), "Rhudaur": (620, 300), "RhunHills": (1005, 835),
     "SouthDowns": (475, 495), "SouthIthilien": (705, 1305),
-    "SouthMirkwood": (805, 645), "SouthRhun": (1030, 850),
-    "TheShire": (340, 505), "TheWold": (740, 845), "TowerHills": (330, 360),
-    "UdunVale": (800, 1105), "Umbar": (570, 1445),
-    "ValeOfErech": (750, 1145), "WeatherHills": (480, 390),
-    "WestRohan": (610, 965), "WitheredHeath": (835, 130),
+    "SouthMirkwood": (805, 645), "SouthRhun": (990, 440),
+    "TheShire": (340, 505), "TheWold": (655, 795), "TowerHills": (330, 360),
+    "UdunVale": (800, 1105), "Umbar": (655, 1485),
+    "ValeOfErech": (445, 1200), "WeatherHills": (480, 390),
+    "WestRohan": (385, 1015), "WitheredHeath": (925, 170),
 }
 
 # Printed strongholds (one per named site drawn on the board).
 STRONGHOLDS = {
     "Moria",          # Mines of Moria
     "EvendimHills",   # Annuminas
-    "GapOfRohan",     # Isengard
+    "Fangorn",        # Isengard (north of the Gap of Rohan border)
     "WestRohan",      # Helm's Deep
     "Rhudaur",        # Rivendell
     "SouthMirkwood",  # Dol Guldur
@@ -165,28 +168,16 @@ STRONGHOLDS = {
 
 # Printed sites of power (official board has 22).
 SITES = {
-    "TheShire",       # Hobbiton
-    "NorthMirkwood",  # Elven Halls
-    "Buckland",       # Bree
-    "Angmar",         # Carn Dûm
-    "EasternAngmar",  # Mount Gundabad
-    "Mithlond",       # Grey Havens
-    "Enedwaith",      # Tharbad
-    "Harlindon",      # Harlond
-    "Lorien",         # Lothlórien
-    "WeatherHills",   # Weathertop
-    "Moria",          # Gates of Moria
-    "Esgaroth",       # Erebor
-    "WestRohan",      # Edoras
-    "RhunHills",      # Easterling Encampment
-    "Ithilien",       # Osgiliath
-    "Lebennin",       # Pelargir
-    "NearHarad",      # Haradrim Encampment
-    "ValeOfErech",    # Erech
-    "TheWold",        # Rauros
-    "Belfalas",       # Dol Amroth
-    "DeadMarshes",    # Dagorlad
-    "MountDoom",
+    # Each site's territory is printed on its mission card.
+    "Fornost": "Bree", "Forodwaith": "Carn Dûm", "DeadMarshes": "Dagorlad",
+    "Belfalas": "Dol Amroth", "BrownLands": "Easterling Encampment",
+    "GapOfRohan": "Edoras", "NorthMirkwood": "Elven Halls",
+    "Esgaroth": "Erebor", "ValeOfErech": "Erech", "Eregion": "Gates of Moria",
+    "Mithlond": "Grey Havens", "Khand": "Haradrim Encampment",
+    "Harlindon": "Harlond", "TheShire": "Hobbiton", "Lorien": "Lothlórien",
+    "MountDoom": "Mount Doom", "EasternAngmar": "Mount Gundabad",
+    "Ithilien": "Osgiliath", "Lebennin": "Pelargir", "TheWold": "Rauros",
+    "Minhiriath": "Tharbad", "WeatherHills": "Weathertop",
 }
 
 # Land borders as they read on the board.  Sea links are kept separate below.
@@ -277,8 +268,55 @@ ADJ = {
     "WitheredHeath": ["NorthRhun", "Esgaroth"],
 }
 
-# Sea routes / bridges drawn dashed on the board.  They are additional
-# adjacency for the engine.
+# Corrections from the 2026-11-17 audit against the board photo.  Rivers are
+# only crossed at the bridges drawn on the board and mountain ranges are
+# impassable (rulebook p.3); the original table had several edges across the
+# Anduin, through the White Mountains and between opposite ends of Haradwaith.
+ADJ_ADD = [('Rhudaur', 'Eregion'), ('BrownLands', 'SouthRhun'), ('Enedwaith', 'WestRohan'), ('Umbar', 'DeepHarad'), ('Harondor', 'Harad'), ('AnduinValley', 'EmynMuil'), ('SouthMirkwood', 'EmynMuil'), ('Lorien', 'TheWold')]
+ADJ_REMOVE = [('DeepHarad', 'Khand'), ('DeepHarad', 'NearHarad'), ('WestRohan', 'TheWold'), ('WestRohan', 'ValeOfErech'), ('WestRohan', 'Lamedon'), ('Lorien', 'AnduinValley'), ('Lorien', 'SouthMirkwood'), ('Lorien', 'EmynMuil'), ('Lorien', 'BrownLands'), ('GladdenFields', 'EasternMirkwood'), ('TheWold', 'BrownLands'), ('TheWold', 'DeadMarshes')]
+for _a, _b in ADJ_ADD:
+    ADJ[_a].append(_b)
+    ADJ[_b].append(_a)
+for _a, _b in ADJ_REMOVE:
+    ADJ[_a].remove(_b)
+    ADJ[_b].remove(_a)
+
+# Bridges drawn on the board (river crossings); each joins adjacent territories.
+BRIDGES = [
+    ("LuneValley", "EvendimHills"), ("TheShire", "Buckland"),
+    ("WeatherHills", "Rhudaur"), ("Rhudaur", "Eregion"), ("Eregion", "Dunland"),
+    ("Minhiriath", "Dunland"), ("Carrock", "AnduinValley"),
+    ("NorthMirkwood", "EasternMirkwood"), ("NorthMirkwood", "Esgaroth"),
+    ("GladdenFields", "AnduinValley"), ("BrownLands", "SouthRhun"),
+    ("TheWold", "EmynMuil"), ("TheWold", "GapOfRohan"),
+    ("Enedwaith", "WestRohan"), ("MinasTirith", "Ithilien"),
+    ("Umbar", "DeepHarad"), ("Harondor", "Harad"),
+]
+
+# Mountain ranges and the territories next to them (The Way Is Under the
+# Mountains lets an invasion cross between two territories of one range).
+MOUNTAINS = [
+    ("Blue Mountains (north)", ["Forlindon", "LuneValley", "Mithlond"]),
+    ("Blue Mountains (south)", ["Harlindon", "Mithlond", "TheShire"]),
+    ("Misty Mountains", ["Forodwaith", "EasternAngmar", "Angmar", "Rhudaur",
+                         "Carrock", "Eregion", "Moria", "GladdenFields",
+                         "Lorien", "Dunland", "Fangorn"]),
+    ("Grey Mountains", ["EasternAngmar", "WitheredHeath", "Carrock",
+                        "NorthMirkwood"]),
+    ("Mountains of Rhûn", ["WitheredHeath", "NorthRhun", "Esgaroth",
+                           "SouthRhun"]),
+    ("Hills of Rhûn", ["BrownLands", "RhunHills", "SouthRhun"]),
+    ("White Mountains", ["WestRohan", "GapOfRohan", "DruwaithIaur",
+                         "ValeOfErech", "Lamedon", "MinasTirith", "Lebennin",
+                         "Andrast", "Anfalas"]),
+    ("Ash Mountains", ["DeadMarshes", "BrownLands", "UdunVale", "Barad-Dur"]),
+    ("Mountains of Shadow", ["Ithilien", "SouthIthilien", "UdunVale",
+                             "MinasMorgul", "Gorgoroth", "Nurn", "Harondor",
+                             "NearHarad", "Khand"]),
+]
+
+# Sea routes drawn dashed on the board.  They are additional adjacency for the
+# engine, and their ends are the board's ports.
 LINKS = [
     ("Forodwaith", "Forlindon"),
     ("Forlindon", "Mithlond"),
@@ -292,141 +330,236 @@ LINKS = [
     ("BrownLands", "RhunHills"),
 ]
 
+# Rulebook: yellow and green are the good armies, black and red the evil ones.
 FACTIONS = [
-    {"name": "Elves of the West", "color": "#e0c341"},
-    {"name": "Riders of Rohan", "color": "#4f8a45"},
-    {"name": "Legions of Mordor", "color": "#b03834"},
-    {"name": "Hordes of Isengard", "color": "#2b2b2b"},
+    {"name": "Elves of the West", "color": "#e0c341", "side": "good"},
+    {"name": "Riders of Rohan", "color": "#4f8a45", "side": "good"},
+    {"name": "Legions of Mordor", "color": "#b03834", "side": "evil"},
+    {"name": "Hordes of Isengard", "color": "#2b2b2b", "side": "evil"},
 ]
 
 EFFECT_IDS = {
+    # generic effects (kept for other packs)
     "HOLD_TERRITORIES", "HOLD_REGION", "CONQUER_N_THIS_TURN",
     "LEADER_REACH", "HOLD_STRONGHOLDS",
     "REGION_ATTRITION", "REINFORCE_ALL", "LOSE_LEADER_UNLESS", "SEA_CLOSED",
     "ATTACK_BONUS", "DEFENSE_BONUS", "REROLL", "EXTRA_REINFORCE",
     "FREE_FORTIFY", "RECRUIT_LEADER", "CANCEL_EVENT",
+    # printed LOTR cards (PLAN.md 10b)
+    "FREE_LEADER", "SIDE_CONTROL", "SEABORNE_TOLL", "LOCAL_UPRISING",
+    "RAIDERS", "MUSTERING", "WINTER_STORMS",
+    "AMBUSH", "SEABORNE_BONUS", "LEADER_MOVE", "INVADED_REINFORCE", "GRIMA",
+    "EXTRA_REDEPLOY", "NO_STRONGHOLD", "WITHDRAW", "MOUNTAIN_PASS",
+    "STORM_REPEL", "BRIDGE_BLOCK", "SITE_MISSION",
 }
 
+# The printed adventure deck (scans in res/textures/cards, copied into the
+# pack as card art).  The ten Fellowship cards are left out: FRISK has no
+# Ring track.  Texts are the printed ones.
+CARD_ART = os.path.join(ROOT, "res", "textures", "cards")
+
+
+def _event(cid, title, text, effect, args, image):
+    return {"id": cid, "kind": "event", "title": title,
+            "text": "Play immediately. " + text, "effect": effect,
+            "args": args, "image": "cards/" + image}
+
+
+def _power(cid, title, timing, text, effect, args, image):
+    return {"id": cid, "kind": "power", "title": title,
+            "text": timing + " " + text, "effect": effect,
+            "args": dict(args, points=1), "image": "cards/" + image}
+
+
+def _mission(cid, site, site_territory, reward, evil, good, epts, gpts, image,
+             **extra):
+    if reward == "card":
+        text = ("Draw 1 extra Territory card at the end of your turn "
+                "(up to a maximum of 5 in your hand).")
+    elif reward == "oathbreakers":
+        text = ("Gather the Oathbreakers. Put 6 battalions on this card. "
+                "Anytime you declare an invasion, you may place these "
+                "battalions into the Territory you are invading from.")
+    elif reward == "region":
+        text = "Receive extra battalions anywhere in %s." % extra["region"]
+    elif reward == "territory":
+        text = "Receive extra battalions in %s." % extra["territory"]
+    elif reward == "port":
+        text = "Receive extra battalions in any 1 Port."
+    else:
+        text = "Receive extra battalions in any Territory."
+    args = {"site": site_territory, "reward": reward,
+            "good": good, "evil": evil,
+            "points": {"good": gpts, "evil": epts}}
+    args.update(extra)
+    return {"id": cid, "kind": "mission", "title": site,
+            "text": "%s (%s). %s" % (site, site_territory, text),
+            "effect": "SITE_MISSION", "args": args,
+            "image": "cards/" + image}
+
+
+_APPOINT = ("Place a second Leader in any Territory you control. If you "
+            "already have 2 Leaders in play, then discard this card.")
+_GRIMA = ("Remove up to 2 enemy battalions from the Territory you are "
+          "invading and add them to your invading Territory. (1 defending "
+          "battalion must always remain.)")
+_STRONGHOLD = "The Stronghold loses its +1 advantage until the invasion ends."
+_MOUNTAINS = ("Invade from one Territory next to a mountain range into one "
+              "other Territory next to the same mountain range.")
+_BRIDGE = ("Choose one bridge to block until the start of your next turn. "
+           "No battalions may cross the bridge unless accompanied by a Leader.")
+
 ADVENTURE_CARDS = [
-    # Missions
-    {"id": "m01", "kind": "mission", "title": "The Shire Must Stand",
-     "text": "Hold The Shire and Buckland at the start of your turn.",
-     "effect": "HOLD_TERRITORIES",
-     "args": {"territories": ["The Shire", "Buckland"], "reward": 2}},
-    {"id": "m02", "kind": "mission", "title": "Crown of the South",
-     "text": "Control all of Gondor at the start of your turn.",
-     "effect": "HOLD_REGION", "args": {"region": "Gondor", "reward": 3}},
-    {"id": "m03", "kind": "mission", "title": "Lightning War",
-     "text": "Conquer 3 territories in a single turn.",
-     "effect": "CONQUER_N_THIS_TURN", "args": {"n": 3, "reward": 2}},
-    {"id": "m04", "kind": "mission", "title": "The Golden Wood",
-     "text": "Bring a leader to Lothlórien.",
-     "effect": "LEADER_REACH", "args": {"territory": "Lothlórien",
-                                        "reward": 2}},
-    {"id": "m05", "kind": "mission", "title": "Keeps of the West",
-     "text": "Hold 2 strongholds at the start of your turn.",
-     "effect": "HOLD_STRONGHOLDS", "args": {"n": 2, "reward": 2}},
-    {"id": "m06", "kind": "mission", "title": "Watch on the Anduin",
-     "text": "Hold Anduin Valley and Gladden Fields at the start of your turn.",
-     "effect": "HOLD_TERRITORIES",
-     "args": {"territories": ["Anduin Valley", "Gladden Fields"],
-              "reward": 2}},
-    {"id": "m07", "kind": "mission", "title": "The North Reborn",
-     "text": "Control all of Arnor at the start of your turn.",
-     "effect": "HOLD_REGION", "args": {"region": "Arnor", "reward": 3}},
-    {"id": "m08", "kind": "mission", "title": "Doom Awaits",
-     "text": "Bring a leader to Mount Doom.",
-     "effect": "LEADER_REACH", "args": {"territory": "Mount Doom",
-                                        "reward": 3}},
-    {"id": "m09", "kind": "mission", "title": "Shadow of Mordor",
-     "text": "Hold 3 strongholds at the start of your turn.",
-     "effect": "HOLD_STRONGHOLDS", "args": {"n": 3, "reward": 4}},
-    {"id": "m10", "kind": "mission", "title": "Wrath of the Ents",
-     "text": "Conquer 4 territories in a single turn.",
-     "effect": "CONQUER_N_THIS_TURN", "args": {"n": 4, "reward": 3}},
-    {"id": "m11", "kind": "mission", "title": "Riders of the South",
-     "text": "Control all of Haradwaith at the start of your turn.",
-     "effect": "HOLD_REGION", "args": {"region": "Haradwaith", "reward": 2}},
-    {"id": "m12", "kind": "mission", "title": "The Northern Watch",
-     "text": "Hold Forodwaith and Angmar at the start of your turn.",
-     "effect": "HOLD_TERRITORIES",
-     "args": {"territories": ["Forodwaith", "Angmar"], "reward": 2}},
-    # Events
-    {"id": "e01", "kind": "event", "title": "Winter Storms",
-     "text": "Each player loses 1 army in every Rhovanion territory they hold.",
-     "effect": "REGION_ATTRITION", "args": {"region": "Rhovanion",
-                                            "loss": 1}},
-    {"id": "e02", "kind": "event", "title": "Fell Winter",
-     "text": "Each player loses 1 army in every Eriador territory they hold.",
-     "effect": "REGION_ATTRITION", "args": {"region": "Eriador", "loss": 1}},
-    {"id": "e03", "kind": "event", "title": "The Mustering of Middle-earth",
-     "text": "Each player adds 2 armies to a stronghold they control.",
-     "effect": "REINFORCE_ALL", "args": {"n": 2}},
-    {"id": "e04", "kind": "event", "title": "Call to Arms",
-     "text": "Each player adds 1 army to a stronghold they control.",
-     "effect": "REINFORCE_ALL", "args": {"n": 1}},
-    {"id": "e05", "kind": "event", "title": "The Black Breath",
-     "text": "Discard a territory card or lose a leader.",
-     "effect": "LOSE_LEADER_UNLESS", "args": {}},
-    {"id": "e06", "kind": "event", "title": "Ambush in the Wild",
-     "text": "Discard a territory card or lose a leader.",
-     "effect": "LOSE_LEADER_UNLESS", "args": {}},
-    {"id": "e07", "kind": "event", "title": "Corsairs of Umbar",
-     "text": "The Umbar-Belfalas sea route is closed until your next turn.",
-     "effect": "SEA_CLOSED", "args": {"a": "Umbar", "b": "Belfalas"}},
-    {"id": "e08", "kind": "event", "title": "Black Sails",
-     "text": "The Mithlond-Minhiriath sea route is closed until your next turn.",
-     "effect": "SEA_CLOSED", "args": {"a": "Mithlond", "b": "Minhiriath"}},
-    {"id": "e09", "kind": "event", "title": "The Shadow Stirs",
-     "text": "Each player loses 1 army in every Mordor territory they hold.",
-     "effect": "REGION_ATTRITION", "args": {"region": "Mordor", "loss": 1}},
-    {"id": "e10", "kind": "event", "title": "Aragorn Arrives",
-     "text": "Each player adds 2 armies to a stronghold they control.",
-     "effect": "REINFORCE_ALL", "args": {"n": 2}},
-    {"id": "e11", "kind": "event", "title": "Grima Wormtongue",
-     "text": "Discard a territory card or lose a leader.",
-     "effect": "LOSE_LEADER_UNLESS", "args": {}},
-    {"id": "e12", "kind": "event", "title": "Violent Storms",
-     "text": "Each player loses 1 army in every Haradwaith territory they hold.",
-     "effect": "REGION_ATTRITION", "args": {"region": "Haradwaith",
-                                            "loss": 1}},
+    # Events ("Play immediately")
+    _event("e01", "Appoint a Second Leader", _APPOINT, "FREE_LEADER",
+           {"max": 2}, "AppointASecondLeader.jpg"),
+    _event("e02", "Appoint a Second Leader", _APPOINT, "FREE_LEADER",
+           {"max": 2}, "AppointASecondLeader2.jpg"),
+    _event("e03", "Appoint a Second Leader", _APPOINT, "FREE_LEADER",
+           {"max": 2}, "AppointASecondLeader3.jpg"),
+    _event("e04", "Appoint a Second Leader", _APPOINT, "FREE_LEADER",
+           {"max": 2}, "AppointASecondLeader4.jpg"),
+    _event("e05", "Aragorn Arrives",
+           "If a Good force controls Minas Tirith, that player receives 10 "
+           "extra battalions there; otherwise, the Evil force loses 2 "
+           "battalions there. (1 battalion must always remain.)",
+           "SIDE_CONTROL", {"territory": "Minas Tirith", "side": "good",
+                            "gain": 10, "loss": 2}, "AragornArrives.jpg"),
+    _event("e06", "The Black Gates Open",
+           "If an Evil force controls Udûn Vale, that player receives 10 "
+           "extra battalions there; otherwise, the Good force loses 2 "
+           "battalions there. (1 battalion must always remain.)",
+           "SIDE_CONTROL", {"territory": "Udûn Vale", "side": "evil",
+                            "gain": 10, "loss": 2}, "TheBlackGatesOpen.jpg"),
+    _event("e07", "The Entmoot",
+           "If a Good force controls Fangorn, that player receives 2 extra "
+           "battalions there; otherwise, the Evil force loses 2 battalions "
+           "there. (1 battalion must always remain.)",
+           "SIDE_CONTROL", {"territory": "Fangorn", "side": "good",
+                            "gain": 2, "loss": 2}, "TheEntmoot.jpg"),
+    _event("e08", "They've Brought a Cavetroll!",
+           "If an Evil force controls Moria, that player receives 2 extra "
+           "battalions there; otherwise, the Good force loses 2 battalions "
+           "there. (1 battalion must always remain.)",
+           "SIDE_CONTROL", {"territory": "Moria", "side": "evil",
+                            "gain": 2, "loss": 2}, "TheyveBroughtACavetroll.jpg"),
+    _event("e09", "Corsairs of Umbar",
+           "Until the start of your next turn, all seaborne invasions lose "
+           "3 battalions before they begin invading. (1 battalion must "
+           "always remain.)", "SEABORNE_TOLL", {"loss": 3},
+           "CorsairsOfUmbar.jpg"),
+    _event("e10", "Local Uprising",
+           "Draw a Territory card and secretly look at it. When you control "
+           "that Territory, reveal the card and add 4 battalions to that "
+           "Territory.", "LOCAL_UPRISING", {"n": 4}, "LocalUprising.jpg"),
+    _event("e11", "Raiders",
+           "Draw the top 3 Territory cards. Half of the battalions in each "
+           "of these Territories are destroyed. Round any losses down, e.g. "
+           "5 battalions = lose 2 battalions. (1 battalion must always "
+           "remain.)", "RAIDERS", {"cards": 3}, "Raiders.jpg"),
+    _event("e12", "The Mustering of Middle-earth",
+           "Draw the top 3 Territory cards. Each of these Territories "
+           "receive 3 extra battalions.", "MUSTERING",
+           {"cards": 3, "n": 3}, "TheMusteringOfMiddleEarth.jpg"),
+    _event("e13", "Winter Storms",
+           "Draw the top 3 Territory cards. No player can invade into or out "
+           "of these Territories until the start of your next turn.",
+           "WINTER_STORMS", {"cards": 3}, "WinterStorms.jpg"),
     # Powers
-    {"id": "p01", "kind": "power", "title": "You Shall Not Pass",
-     "text": "Add 1 to one attack die in a battle.",
-     "effect": "ATTACK_BONUS", "args": {"n": 1}},
-    {"id": "p02", "kind": "power", "title": "Courage Alone Will Not Save You",
-     "text": "Add 1 to one attack die in a battle.",
-     "effect": "ATTACK_BONUS", "args": {"n": 1}},
-    {"id": "p03", "kind": "power", "title": "The Black Gates Open",
-     "text": "Add 1 to your highest defence die.",
-     "effect": "DEFENSE_BONUS", "args": {"n": 1}},
-    {"id": "p04", "kind": "power", "title": "They've Brought a Cave Troll",
-     "text": "Add 2 to your highest defence die.",
-     "effect": "DEFENSE_BONUS", "args": {"n": 2}},
-    {"id": "p05", "kind": "power", "title": "Borne to Another Place",
-     "text": "Re-roll your dice once in a battle just rolled.",
-     "effect": "REROLL", "args": {}},
-    {"id": "p06", "kind": "power", "title": "The Hunt for the Ringbearer",
-     "text": "Re-roll your dice once in a battle just rolled.",
-     "effect": "REROLL", "args": {}},
-    {"id": "p07", "kind": "power", "title": "The Entmoot",
-     "text": "Take 3 extra armies this reinforcement phase.",
-     "effect": "EXTRA_REINFORCE", "args": {"n": 3}},
-    {"id": "p08", "kind": "power", "title": "Siege Machines",
-     "text": "Take 2 extra armies this reinforcement phase.",
-     "effect": "EXTRA_REINFORCE", "args": {"n": 2}},
-    {"id": "p09", "kind": "power", "title": "Move by Night",
-     "text": "Make a second fortify move this turn.",
-     "effect": "FREE_FORTIFY", "args": {}},
-    {"id": "p10", "kind": "power", "title": "Appoint a Second Leader",
-     "text": "Place a leader for free.",
-     "effect": "RECRUIT_LEADER", "args": {}},
-    {"id": "p11", "kind": "power", "title": "The Enemy Is at Hand",
-     "text": "Negate an event just drawn by any player.",
-     "effect": "CANCEL_EVENT", "args": {}},
-    {"id": "p12", "kind": "power", "title": "The Way Is Under the Mountains",
-     "text": "Add 1 to one attack die in a battle.",
-     "effect": "ATTACK_BONUS", "args": {"n": 1}},
+    _power("p01", "Ambush!", "Play before invading a Territory.",
+           "Gain 3 extra battalions in the Territory you are invading from.",
+           "AMBUSH", {"n": 3}, "Ambush.jpg"),
+    _power("p02", "Black Sails", "Play after declaring a seaborne invasion.",
+           "Add 1 to your highest die roll for the entire invasion.",
+           "SEABORNE_BONUS", {"n": 1}, "BlackSails.jpg"),
+    _power("p03", "Borne to Another Place", "Play at the start of your turn.",
+           "Move one of your Leaders to any Territory you control. The "
+           "Leader can then continue as normal.", "LEADER_MOVE", {},
+           "BorneToAnotherPlace.jpg"),
+    _power("p04", "Courage Alone Will Not Save You!",
+           "Play after an enemy declares an invasion on one of your "
+           "Territories.", "Gain 4 extra battalions in the Territory being "
+           "invaded.", "INVADED_REINFORCE", {"n": 4},
+           "CourageAloneWIllNotSaveYou.jpg"),
+    _power("p05", "Gríma Wormtongue", "Play before invading a Territory.",
+           _GRIMA, "GRIMA", {"n": 2}, "GrimaWormtongue.jpg"),
+    _power("p06", "Gríma Wormtongue", "Play before invading a Territory.",
+           _GRIMA, "GRIMA", {"n": 2}, "GrimaWormtongue2.jpg"),
+    _power("p07", "Move by Night",
+           "Play after your last invasion for this turn.",
+           "Make up to 3 extra redeployments.", "EXTRA_REDEPLOY", {"n": 3},
+           "MoveByNight.jpg"),
+    _power("p08", "Siege Machines",
+           "Play before invading a Territory with a Stronghold.",
+           _STRONGHOLD, "NO_STRONGHOLD", {}, "SiegeMachines.jpg"),
+    _power("p09", "The Enemy Is at Hand!",
+           "Play before invading a Territory with a Stronghold.",
+           _STRONGHOLD, "NO_STRONGHOLD", {}, "TheEnemyIsAtHand.jpg"),
+    _power("p10", "Strategic Withdrawal",
+           "Play after an enemy declares an invasion on one of your "
+           "Territories.", "You may move all but 1 battalion from your "
+           "invaded Territory into an adjacent Territory that you control.",
+           "WITHDRAW", {}, "StrategicWithdrawal.jpg"),
+    _power("p11", "The Way Is Under the Mountains",
+           "Play after declaring an invasion.", _MOUNTAINS, "MOUNTAIN_PASS",
+           {}, "TheWayIsUnderTheMountains.jpg"),
+    _power("p12", "The Way Is Under the Mountains",
+           "Play after declaring an invasion.", _MOUNTAINS, "MOUNTAIN_PASS",
+           {}, "TheWayIsUnderTheMountains2.jpg"),
+    _power("p13", "Violent Storms",
+           "Play after a seaborne battle is declared on one of your "
+           "Territories with a Port.", "Destroy all attacking battalions in "
+           "this battle (not this invasion).", "STORM_REPEL", {},
+           "ViolentStorms.jpg"),
+    _power("p14", "You Shall Not Pass!", "Play at the start of your turn.",
+           _BRIDGE, "BRIDGE_BLOCK", {}, "YouShallNotPass.jpg"),
+    _power("p15", "You Shall Not Pass!", "Play at the start of your turn.",
+           _BRIDGE, "BRIDGE_BLOCK", {}, "YouShallNotPass2.jpg"),
+    # Site missions: reward for (evil, good) and points (evil, good)
+    _mission("m01", "Bree", "Fornost", "region", 6, 2, 2, 1, "Bree.jpg",
+             region="Arnor"),
+    _mission("m02", "Carn Dûm", "Forodwaith", "region", 2, 2, 2, 2,
+             "CarnDum.jpg", region="Arnor"),
+    _mission("m03", "Dagorlad", "Dead Marshes", "region", 2, 2, 1, 4,
+             "Dagorlad.jpg", region="Rhovanion"),
+    _mission("m04", "Dol Amroth", "Belfalas", "port", 2, 2, 2, 2,
+             "DolAmroth.jpg"),
+    _mission("m05", "Easterling Encampment", "Brown Lands", "territory",
+             2, 6, 1, 2, "EasterlingEncampment.jpg", territory="Brown Lands"),
+    _mission("m06", "Edoras", "Gap of Rohan", "card", 0, 0, 2, 2,
+             "Edoras.jpg"),
+    _mission("m07", "Elven Halls", "North Mirkwood", "any", 1, 2, 2, 2,
+             "ElvenHalls.jpg"),
+    _mission("m08", "Erebor", "Esgaroth", "territory", 2, 4, 1, 2,
+             "Erebor.jpg", territory="Esgaroth"),
+    _mission("m09", "Erech", "Vale of Erech", "oathbreakers", 6, 6, 1, 1,
+             "Erech.jpg"),
+    _mission("m10", "Gates of Moria", "Eregion", "territory", 4, 2, 1, 2,
+             "GatesOfMoria.jpg", territory="Eregion"),
+    _mission("m11", "Grey Havens", "Mithlond", "territory", 4, 2, 2, 2,
+             "GreyHavens.jpg", territory="Mithlond"),
+    _mission("m12", "Haradrim Encampment", "Khand", "region", 4, 2, 1, 4,
+             "HaradrimEncampment.jpg", region="Haradwaith"),
+    _mission("m13", "Harlond", "Harlindon", "card", 0, 0, 3, 2,
+             "Harlond.jpg"),
+    _mission("m14", "Hobbiton", "The Shire", "region", 2, 2, 4, 1,
+             "Hobbiton.jpg", region="Eriador"),
+    _mission("m15", "Lothlórien", "Lothlórien", "card", 0, 0, 2, 2,
+             "Lothlorien.jpg"),
+    _mission("m16", "Mount Doom", "Mount Doom", "any", 5, 2, 2, 6,
+             "MountDoom.jpg"),
+    _mission("m17", "Mount Gundabad", "Eastern Angmar", "region", 4, 4, 1, 2,
+             "MountGundabad.jpg", region="Arnor"),
+    _mission("m18", "Osgiliath", "Ithilien", "region", 4, 2, 1, 3,
+             "Osgiliath.jpg", region="Gondor"),
+    _mission("m19", "Pelargir", "Lebennin", "region", 5, 5, 1, 1,
+             "Pelargir.jpg", region="Gondor"),
+    _mission("m20", "Rauros", "The Wold", "region", 2, 2, 2, 2,
+             "Rauros.jpg", region="Rhovanion"),
+    _mission("m21", "Tharbad", "Minhiriath", "region", 4, 4, 2, 2,
+             "Tharbad.jpg", region="Rohan"),
+    _mission("m22", "Weathertop", "Weather Hills", "region", 2, 2, 3, 1,
+             "Weathertop.jpg", region="Arnor"),
 ]
 
 
@@ -443,6 +576,9 @@ def territory_order():
     for _, members in REGION_OF.items():
         names.extend(members)
     return names
+
+
+PORTS = sorted({n for link in LINKS for n in link})
 
 
 def build_map():
@@ -492,6 +628,7 @@ def build_map():
             "id": i,
             "name": f["name"],
             "color": f["color"],
+            "side": f["side"],
             "sprites": {
                 "unit1": "pieces/unit1.svg",
                 "unit3": "pieces/unit3.svg",
@@ -512,6 +649,7 @@ def build_map():
             "label": [x, y],
             "stronghold": n in STRONGHOLDS,
             "site": n in SITES,
+            "port": n in PORTS,
             "adjacent": sorted(territory_ids[m] for m in ADJ[n]),
         })
 
@@ -536,6 +674,14 @@ def build_map():
     for c in ADVENTURE_CARDS:
         assert c["effect"] in EFFECT_IDS, c["id"]
         assert c["kind"] in ("mission", "event", "power"), c["id"]
+        if c["effect"] == "SITE_MISSION":
+            site = next(k for k, v in DISPLAY.items() if v == c["args"]["site"])
+            assert site in SITES, c["id"]
+    for a, b in BRIDGES:
+        assert b in ADJ[a], "bridge %s-%s joins non-adjacent territories" % (a, b)
+    for _name, members in MOUNTAINS:
+        for n in members:
+            assert n in DISPLAY, n
 
     return {
         "name": "The Lord of the Rings (Trilogy Edition)",
@@ -545,6 +691,11 @@ def build_map():
         "regions": regions,
         "territories": territories,
         "links": links,
+        "bridges": [{"a": territory_ids[a], "b": territory_ids[b]}
+                    for a, b in BRIDGES],
+        "mountains": [{"name": name,
+                       "territories": sorted(territory_ids[n] for n in members)}
+                      for name, members in MOUNTAINS],
         "territoryCards": territory_cards,
         "adventureCards": ADVENTURE_CARDS,
         "setup": {
@@ -561,6 +712,8 @@ def build_map():
             "leadersPerPlayer": 2,
             "leaderCost": 3,
             "dieCap": 6,
+            "adventureStartHand": 4,
+            "drawOnLeaderConquest": True,
         },
         "_order": order,
     }
@@ -619,6 +772,16 @@ def main():
     os.makedirs(PACK, exist_ok=True)
     json_path = os.path.join(PACK, "map.json")
     svg_path = os.path.join(PACK, "board.svg")
+    os.makedirs(os.path.join(PACK, "cards"), exist_ok=True)
+    for card in data["adventureCards"]:
+        name = card["image"].split("/", 1)[1]
+        for folder in ("action", "missions"):
+            source = os.path.join(CARD_ART, folder, name)
+            if os.path.exists(source):
+                shutil.copyfile(source, os.path.join(PACK, card["image"]))
+                break
+        else:
+            raise SystemExit("missing card art %s" % name)
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")

@@ -528,7 +528,10 @@ void *play_action_callback(struct AmmServer_DynamicRequest *rqst)
             return 0;
         }
         if (strcmp(mc->effect, "DEFENSE_BONUS") == 0 ||
-            strcmp(mc->effect, "REROLL") == 0) {
+            strcmp(mc->effect, "REROLL") == 0 ||
+            strcmp(mc->effect, "INVADED_REINFORCE") == 0 ||
+            strcmp(mc->effect, "WITHDRAW") == 0 ||
+            strcmp(mc->effect, "STORM_REPEL") == 0) {
             if (mode == 2 && threshold < 1) {
                 frisk_json_error(rqst, 400, "params");
                 pthread_mutex_unlock(&friskLock);
@@ -691,6 +694,9 @@ void *play_action_callback(struct AmmServer_DynamicRequest *rqst)
         }
         action.card_a = (int)value;
         action.territory = -1;
+        action.from = -1;
+        action.to = -1;
+        action.bridge = -1;
         if (post_uint_if_present(rqst, "t", 0,
                                  MAP_MAX_TERRITORIES - 1, &value)) {
             if (_POSTexists(rqst, "t")) {
@@ -699,7 +705,44 @@ void *play_action_callback(struct AmmServer_DynamicRequest *rqst)
         } else {
             goto bad_params;
         }
+        /* Printed powers: an invasion (from/to), a Leader move (from/to) or
+         * a bridge. */
+        if (_POSTexists(rqst, "from")) {
+            if (!frisk_post_uint(rqst, "from", 0, MAP_MAX_TERRITORIES - 1,
+                                 &value)) {
+                goto bad_params;
+            }
+            action.from = (int)value;
+        }
+        if (_POSTexists(rqst, "to")) {
+            if (!frisk_post_uint(rqst, "to", 0, MAP_MAX_TERRITORIES - 1,
+                                 &value)) {
+                goto bad_params;
+            }
+            action.to = (int)value;
+        }
+        if (_POSTexists(rqst, "bridge")) {
+            if (!frisk_post_uint(rqst, "bridge", 0, MAP_MAX_BRIDGES - 1,
+                                 &value)) {
+                goto bad_params;
+            }
+            action.bridge = (int)value;
+        }
         action.type = ACT_PLAY_CARD;
+    } else if (strcmp(type, "claim_mission") == 0) {
+        if (!frisk_post_uint(rqst, "card", 0,
+                             GAME_ADVENTURE_HAND_MAX - 1, &value)) {
+            goto bad_params;
+        }
+        action.type = ACT_CLAIM_MISSION;
+        action.card_a = (int)value;
+    } else if (strcmp(type, "oathbreakers") == 0) {
+        if (!frisk_post_uint(rqst, "t", 0, MAP_MAX_TERRITORIES - 1,
+                             &value)) {
+            goto bad_params;
+        }
+        action.type = ACT_OATHBREAKERS;
+        action.territory = (int)value;
     } else if (strcmp(type, "discard_adventure") == 0) {
         if (!frisk_post_uint(rqst, "card", 0,
                              GAME_ADVENTURE_HAND_MAX - 1, &value)) {

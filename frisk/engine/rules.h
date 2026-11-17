@@ -16,7 +16,7 @@
 #define GAME_SITE_MASK_WORDS 4
 #define GAME_LOG_RING 64
 #define GAME_MAX_BLITZ_ROUNDS 32
-#define GAME_MAX_EVENTS_PER_ACTION 8
+#define GAME_MAX_EVENTS_PER_ACTION 24
 #define GAME_NAME_SIZE 64
 #define GAME_USERNAME_SIZE 64
 #define GAME_PASSWORD_HASH_SIZE 128
@@ -61,7 +61,25 @@ enum ActionType {
     ACT_KICK,
     ACT_RECRUIT_LEADER,
     ACT_PLAY_CARD,
-    ACT_DISCARD_ADVENTURE
+    ACT_DISCARD_ADVENTURE,
+    ACT_CLAIM_MISSION,      /* card_a = hand slot of a site mission */
+    ACT_OATHBREAKERS        /* territory = the territory invading from */
+};
+
+/* Printed-card invasion state (PLAN.md 10b.4).  An invasion is a run of
+ * attacks from one territory into one territory. */
+#define INV_NO_STRONGHOLD 1     /* Siege Machines / The Enemy Is at Hand */
+#define INV_MOUNTAIN      2     /* The Way Is Under the Mountains */
+#define INV_STARTED       4     /* declaration effects already applied */
+#define INV_STORM_DONE    8     /* Violent Storms already struck */
+
+/* Mission reward placement areas. */
+enum BonusArea {
+    BONUS_NONE = 0,
+    BONUS_ANY,          /* all into one territory you control */
+    BONUS_REGION,       /* anywhere in a region (any split) */
+    BONUS_TERRITORY,    /* into one named territory */
+    BONUS_PORT          /* all into one port you control */
 };
 
 enum EventKind {
@@ -115,6 +133,10 @@ struct Seat {
     unsigned int site_claimed[GAME_SITE_MASK_WORDS];
     struct PlayerStats stats;
     int last_seen_version;
+    int uprising_card;           /* Local Uprising territory card or -1 */
+    int uprising_bonus;
+    int oathbreakers;            /* Erech: battalions waiting on the card */
+    int extra_card_draws;        /* missions: extra territory cards at end */
 };
 
 struct TerritoryState {
@@ -137,6 +159,7 @@ struct Action {
     int card_a;
     int card_b;
     int card_c;
+    int bridge;                  /* You Shall Not Pass: bridge index */
 };
 
 struct DiceBattle {
@@ -239,6 +262,21 @@ struct Game {
     struct ReinforcementInfo reinforce_info;
     time_t created;
     time_t updated;
+    /* printed adventure cards (PLAN.md 10b) */
+    int leader_conquered_site;   /* a leader conquered a site this turn */
+    int draw_pending;            /* end-of-turn adventure draw in progress */
+    int pending_free_leader;     /* Appoint a Second Leader awaits a choice */
+    int bonus_pending;           /* mission reward still to place */
+    int bonus_area;              /* enum BonusArea */
+    int bonus_area_id;           /* region or territory id */
+    int inv_from;
+    int inv_to;
+    int inv_flags;               /* INV_* */
+    int inv_attack_bonus;        /* Black Sails */
+    int toll_by;                 /* Corsairs of Umbar: drawer seat + 1 */
+    int toll_loss;
+    int frozen_by[GAME_MAX_TERRITORIES];   /* Winter Storms: seat + 1 */
+    int bridge_blocked_by[MAP_MAX_BRIDGES]; /* You Shall Not Pass: seat + 1 */
     struct GameLog log;
     struct DiceRng rng;
     const struct Map *map;       /* not serialised; the server resolves the pack */
@@ -269,6 +307,11 @@ struct LegalActions {
     int leader_placeable[GAME_MAX_TERRITORIES];
     int recruit_placeable[GAME_MAX_TERRITORIES];
     int playable_adventure[GAME_ADVENTURE_HAND_MAX];
+    int claimable_mission[GAME_ADVENTURE_HAND_MAX];
+    int free_leader_pending;
+    int bonus_pending;
+    int bonus_placeable[GAME_MAX_TERRITORIES];
+    int can_oathbreakers;
     int max_attack_dice[GAME_MAX_TERRITORIES];
     unsigned char attack[GAME_MAX_TERRITORIES][GAME_MAX_TERRITORIES];
     unsigned char fortify[GAME_MAX_TERRITORIES][GAME_MAX_TERRITORIES];
@@ -303,6 +346,11 @@ int game_count_territories(const struct Game *g, int player);
 int game_can_fortify(const struct Game *g, int player, int from, int to);
 int game_find_card_set(const struct Game *g, int player,
                        int *card_a, int *card_b, int *card_c);
+/* Rebuild the adventure deck from the map (and deal starting hands when the
+ * pack asks for them) for a game saved with an older deck; only valid while
+ * no adventure card is held or played. */
+void game_rebuild_adventure_deck(struct Game *g);
+int game_attack_route(const struct Game *g, int player, int from, int to);
 
 const char *game_phase_name(int phase);
 const char *game_status_name(int status);

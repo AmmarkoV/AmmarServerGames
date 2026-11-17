@@ -239,6 +239,22 @@ static int load_factions(const JsonValue *root, struct Map *map,
                         err, err_size) != 0) {
             return -1;
         }
+        {
+            const JsonValue *side = json_get(faction, "side");
+            const char *text = side != NULL ? json_get_string(side) : NULL;
+            if (side == NULL) {
+                out->side = MAP_SIDE_NONE;
+            } else if (text != NULL && strcmp(text, "good") == 0) {
+                out->side = MAP_SIDE_GOOD;
+            } else if (text != NULL && strcmp(text, "evil") == 0) {
+                out->side = MAP_SIDE_EVIL;
+            } else {
+                set_error(err, err_size,
+                          "%s: \"side\" must be \"good\" or \"evil\"",
+                          context);
+                return -1;
+            }
+        }
         if (required_string(sprites, "unit1", out->unit1, sizeof(out->unit1),
                             context, err, err_size) != 0 ||
             required_string(sprites, "unit3", out->unit3, sizeof(out->unit3),
@@ -381,6 +397,8 @@ static int load_territories(const JsonValue *root, struct Map *map,
         if (optional_bool(territory, "stronghold", 0, &out->stronghold,
                           context, err, err_size) != 0 ||
             optional_bool(territory, "site", 0, &out->site,
+                          context, err, err_size) != 0 ||
+            optional_bool(territory, "port", 0, &out->port,
                           context, err, err_size) != 0) {
             return -1;
         }
@@ -450,6 +468,82 @@ static int load_links(const JsonValue *root, struct Map *map,
                             context, err, err_size) != 0) {
             return -1;
         }
+    }
+    return 0;
+}
+
+/* Optional "bridges": [{"a":0,"b":1}, ...] and "mountains":
+ * [{"name":"...","territories":[ids]}, ...] (PLAN.md 10b.2). */
+static int load_bridges_and_mountains(const JsonValue *root, struct Map *map,
+                                      char *err, size_t err_size)
+{
+    const JsonValue *array;
+    size_t i, count;
+
+    map->bridgeCount = 0;
+    map->mountainCount = 0;
+    if (json_get(root, "bridges") != NULL) {
+        if (load_array(root, "bridges", MAP_MAX_BRIDGES, &array,
+                       "map.json", err, err_size) != 0) {
+            return -1;
+        }
+        count = json_count(array);
+        for (i = 0; i < count; i++) {
+            char context[64];
+            struct MapBridge *out = &map->bridges[i];
+            snprintf(context, sizeof(context), "bridge %zu", i);
+            if (required_int(json_at(array, i), "a", 0,
+                             MAP_MAX_TERRITORIES - 1, &out->a, context,
+                             err, err_size) != 0 ||
+                required_int(json_at(array, i), "b", 0,
+                             MAP_MAX_TERRITORIES - 1, &out->b, context,
+                             err, err_size) != 0) {
+                return -1;
+            }
+        }
+        map->bridgeCount = (int)count;
+    }
+    if (json_get(root, "mountains") != NULL) {
+        if (load_array(root, "mountains", MAP_MAX_MOUNTAINS, &array,
+                       "map.json", err, err_size) != 0) {
+            return -1;
+        }
+        count = json_count(array);
+        for (i = 0; i < count; i++) {
+            const JsonValue *range = json_at(array, i);
+            const JsonValue *members;
+            struct MapMountain *out = &map->mountains[i];
+            char context[64];
+            size_t k;
+
+            snprintf(context, sizeof(context), "mountain range %zu", i);
+            if (range == NULL || range->type != JSON_OBJECT ||
+                required_string(range, "name", out->name, sizeof(out->name),
+                                context, err, err_size) != 0) {
+                if (range == NULL || range->type != JSON_OBJECT) {
+                    set_error(err, err_size, "%s: must be an object",
+                              context);
+                }
+                return -1;
+            }
+            if (load_array(range, "territories", MAP_MAX_TERRITORIES,
+                           &members, context, err, err_size) != 0) {
+                return -1;
+            }
+            out->count = (int)json_count(members);
+            for (k = 0; k < json_count(members); k++) {
+                long long id;
+                if (json_get_int(json_at(members, k), &id) != 0 ||
+                    id < 0 || id >= MAP_MAX_TERRITORIES) {
+                    set_error(err, err_size,
+                              "%s: territories must be territory ids",
+                              context);
+                    return -1;
+                }
+                out->territories[k] = (int)id;
+            }
+        }
+        map->mountainCount = (int)count;
     }
     return 0;
 }
@@ -640,6 +734,12 @@ static int load_setup_and_rules(const JsonValue *root, struct Map *map,
         optional_int(rules, "leaderCost", 0, 1000, 3,
                      &map->rules.leaderCost, "rules",
                      err, err_size) != 0 ||
+        optional_int(rules, "adventureStartHand", 0, 8, 0,
+                     &map->rules.adventureStartHand, "rules",
+                     err, err_size) != 0 ||
+        optional_bool(rules, "drawOnLeaderConquest", 0,
+                      &map->rules.drawOnLeaderConquest, "rules",
+                      err, err_size) != 0 ||
         optional_int(rules, "dieCap", 0, 100, 6, &map->rules.dieCap,
                      "rules", err, err_size) != 0) {
         return -1;
@@ -707,6 +807,7 @@ int map_load(const char *directory, struct Map *map,
         load_regions(root, map, err, err_size) != 0 ||
         load_territories(root, map, err, err_size) != 0 ||
         load_links(root, map, err, err_size) != 0 ||
+        load_bridges_and_mountains(root, map, err, err_size) != 0 ||
         load_territory_cards(root, map, err, err_size) != 0 ||
         load_adventure_cards(root, map, err, err_size) != 0 ||
         load_setup_and_rules(root, map, err, err_size) != 0) {
@@ -780,6 +881,50 @@ int map_are_adjacent(const struct Map *map, int a, int b)
         }
     }
     return map_has_link(map, a, b);
+}
+
+int map_bridge_index(const struct Map *map, int a, int b)
+{
+    int i;
+
+    if (map == NULL) {
+        return -1;
+    }
+    for (i = 0; i < map->bridgeCount; i++) {
+        if ((map->bridges[i].a == a && map->bridges[i].b == b) ||
+            (map->bridges[i].a == b && map->bridges[i].b == a)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int map_same_range(const struct Map *map, int a, int b)
+{
+    int r;
+
+    if (map == NULL || a == b) {
+        return 0;
+    }
+    for (r = 0; r < map->mountainCount; r++) {
+        int k, has_a = 0, has_b = 0;
+        for (k = 0; k < map->mountains[r].count; k++) {
+            has_a |= map->mountains[r].territories[k] == a;
+            has_b |= map->mountains[r].territories[k] == b;
+        }
+        if (has_a && has_b) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int map_faction_side(const struct Map *map, int faction)
+{
+    if (map == NULL || faction < 0 || faction >= map->factionCount) {
+        return MAP_SIDE_NONE;
+    }
+    return map->factions[faction].side;
 }
 
 int map_has_link(const struct Map *map, int a, int b)
@@ -1133,6 +1278,34 @@ int map_validate(const struct Map *map, char *err, size_t err_size)
         return -1;
     }
     (void)wilds;
+
+    for (i = 0; i < map->bridgeCount; i++) {
+        int a = map->bridges[i].a;
+        int b = map->bridges[i].b;
+        if (a >= map->territoryCount || b >= map->territoryCount ||
+            !map_are_adjacent(map, a, b)) {
+            set_error(err, err_size,
+                      "bridge %d does not join two adjacent territories", i);
+            return -1;
+        }
+    }
+    for (i = 0; i < map->mountainCount; i++) {
+        int k;
+        if (map->mountains[i].count < 2) {
+            set_error(err, err_size,
+                      "mountain range \"%s\" needs at least 2 territories",
+                      map->mountains[i].name);
+            return -1;
+        }
+        for (k = 0; k < map->mountains[i].count; k++) {
+            if (map->mountains[i].territories[k] >= map->territoryCount) {
+                set_error(err, err_size,
+                          "mountain range \"%s\" lists a missing territory",
+                          map->mountains[i].name);
+                return -1;
+            }
+        }
+    }
 
     if (map->adventureCardCount > MAP_MAX_CARDS) {
         set_error(err, err_size, "too many adventure cards");

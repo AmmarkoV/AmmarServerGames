@@ -83,10 +83,22 @@ def main():
               encoding="utf-8") as handle:
         json.dump(map_data, handle, indent=2)
         handle.write("\n")
+    # Like the LOTR pack, territories are small anchor hexes around the
+    # label (the browser test relies on the client's larger hit areas).
     with open(os.path.join(destination, "board.svg"), "w",
               encoding="utf-8") as handle:
         handle.write('<svg xmlns="http://www.w3.org/2000/svg" '
-                     'width="600" height="440"></svg>\n')
+                     'width="600" height="440">\n'
+                     '<style>.territory{fill:#fff;fill-opacity:.06;'
+                     'stroke:#333;stroke-width:1.8}</style>\n')
+        for territory in territories:
+            x, y = territory["label"]
+            points = " L ".join(
+                f"{x + dx},{y + dy}" for dx, dy in
+                ((14, 0), (7, 12), (-7, 12), (-14, 0), (-7, -12), (7, -12)))
+            handle.write(f'<path id="t{territory["id"]}" class="territory" '
+                         f'd="M {points} Z"/>\n')
+        handle.write('</svg>\n')
     os.makedirs(os.path.join(destination, "pieces"), exist_ok=True)
     return 0
 

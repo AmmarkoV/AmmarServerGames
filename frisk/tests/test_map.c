@@ -9,6 +9,7 @@
 int test_rules_suite(void);
 int test_serialize_suite(const char *directory);
 int test_cards_suite(void);
+int test_printed_suite(void);
 
 static int failures = 0;
 static int checks = 0;
@@ -111,7 +112,35 @@ static void test_map(const char *directory)
     CHECK(map->factionCount == 4);
     CHECK(map->linkCount == 10);
     CHECK(map->territoryCardCount == 66);
-    CHECK(map->adventureCardCount == 36);
+    CHECK(map->adventureCardCount == 50);   /* printed deck, no Fellowship */
+    CHECK(map->bridgeCount == 17);
+    CHECK(map->mountainCount == 9);
+    CHECK(map->rules.adventureStartHand == 4);
+    CHECK(map->rules.drawOnLeaderConquest == 1);
+    CHECK(map_faction_side(map, 0) == MAP_SIDE_GOOD);
+    CHECK(map_faction_side(map, 2) == MAP_SIDE_EVIL);
+    {
+        int fangorn = map_find_territory(map, "Fangorn");
+        int fornost = map_find_territory(map, "Fornost");
+        int buckland = map_find_territory(map, "Buckland");
+        int shire = map_find_territory(map, "The Shire");
+        int harad = map_find_territory(map, "Deep Harad");
+        int khand = map_find_territory(map, "Khand");
+        int umbar = map_find_territory(map, "Umbar");
+        int ithilien = map_find_territory(map, "Ithilien");
+        int dunland = map_find_territory(map, "Dunland");
+        int moria = map_find_territory(map, "Moria");
+        CHECK(map->territories[fangorn].stronghold);   /* Isengard */
+        CHECK(map->territories[fornost].site);         /* Bree */
+        CHECK(!map->territories[buckland].site);
+        CHECK(map_bridge_index(map, shire, buckland) >= 0);
+        CHECK(!map_are_adjacent(map, harad, khand));
+        CHECK(map_are_adjacent(map, harad, umbar));    /* bridge */
+        CHECK(map->territories[umbar].port);
+        CHECK(map_same_range(map, ithilien, khand));   /* Mountains of Shadow */
+        CHECK(map_same_range(map, dunland, moria));    /* Misty Mountains */
+        CHECK(!map_same_range(map, dunland, ithilien));
+    }
     CHECK(count_wild_cards(map) == 2);
     CHECK(count_strongholds(map) == 11);
     CHECK(count_sites(map) == 22);
@@ -192,6 +221,7 @@ int main(int argc, char **argv)
     rules_failures = test_rules_suite();
     serialize_failures = test_serialize_suite(directory);
     card_failures = test_cards_suite();
+    card_failures += test_printed_suite();
     printf("%s: %d map checks, %d map failures, %d rules failures, "
            "%d serialize failures, %d card failures\n",
            (failures == 0 && rules_failures == 0 &&

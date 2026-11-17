@@ -7,6 +7,9 @@
 #include "../engine/serialize.h"
 
 static struct Map fuzz_map;
+static struct Map printed_map;       /* PLAN.md 10b: printed LOTR cards */
+static const struct Map *active_map = &fuzz_map;
+static int printed_mode;
 
 static void build_fuzz_map(void)
 {
@@ -139,12 +142,99 @@ static void build_fuzz_map(void)
     fuzz_map.rules.dieCap = 6;
 }
 
+/* The same board with sides, ports, a bridge, a mountain range, the printed
+ * card effects and the rulebook card flow. */
+static void build_printed_map(void)
+{
+    static const struct {
+        const char *id, *kind, *effect, *args;
+    } adv[] = {
+        { "e1", "event", "FREE_LEADER", "{\"max\":2}" },
+        { "e2", "event", "FREE_LEADER", "{\"max\":2}" },
+        { "e3", "event", "SIDE_CONTROL",
+          "{\"territory\":\"T5\",\"side\":\"good\",\"gain\":10,\"loss\":2}" },
+        { "e4", "event", "SEABORNE_TOLL", "{\"loss\":3}" },
+        { "e5", "event", "LOCAL_UPRISING", "{\"n\":4}" },
+        { "e6", "event", "RAIDERS", "{\"cards\":3}" },
+        { "e7", "event", "MUSTERING", "{\"cards\":3,\"n\":3}" },
+        { "e8", "event", "WINTER_STORMS", "{\"cards\":3}" },
+        { "p1", "power", "AMBUSH", "{\"n\":3}" },
+        { "p2", "power", "SEABORNE_BONUS", "{\"n\":1}" },
+        { "p3", "power", "LEADER_MOVE", "{}" },
+        { "p4", "power", "INVADED_REINFORCE", "{\"n\":4}" },
+        { "p5", "power", "GRIMA", "{\"n\":2}" },
+        { "p6", "power", "EXTRA_REDEPLOY", "{\"n\":3}" },
+        { "p7", "power", "NO_STRONGHOLD", "{}" },
+        { "p8", "power", "WITHDRAW", "{}" },
+        { "p9", "power", "MOUNTAIN_PASS", "{}" },
+        { "pa", "power", "STORM_REPEL", "{}" },
+        { "pb", "power", "BRIDGE_BLOCK", "{}" },
+        { "m1", "mission", "SITE_MISSION",
+          "{\"site\":\"T2\",\"reward\":\"region\",\"region\":\"North\","
+          "\"good\":2,\"evil\":6}" },
+        { "m2", "mission", "SITE_MISSION",
+          "{\"site\":\"T6\",\"reward\":\"port\",\"good\":2,\"evil\":2}" },
+        { "m3", "mission", "SITE_MISSION",
+          "{\"site\":\"T2\",\"reward\":\"card\",\"good\":0,\"evil\":0}" },
+        { "m4", "mission", "SITE_MISSION",
+          "{\"site\":\"T6\",\"reward\":\"oathbreakers\",\"good\":6,"
+          "\"evil\":6}" },
+        { "m5", "mission", "SITE_MISSION",
+          "{\"site\":\"T2\",\"reward\":\"any\",\"good\":2,\"evil\":5}" },
+        { "m6", "mission", "SITE_MISSION",
+          "{\"site\":\"T6\",\"reward\":\"territory\",\"territory\":\"T6\","
+          "\"good\":4,\"evil\":2}" },
+    };
+    int c;
+
+    printed_map = fuzz_map;
+    strcpy(printed_map.name, "Printed Fuzz Map");
+    for (c = 0; c < 4; c++) {
+        printed_map.factions[c].side = c < 2 ? MAP_SIDE_GOOD : MAP_SIDE_EVIL;
+    }
+    strcpy(printed_map.links[0].kind, "sea");
+    printed_map.territories[3].port = 1;
+    printed_map.territories[4].port = 1;
+    printed_map.bridgeCount = 1;
+    printed_map.bridges[0].a = 1;
+    printed_map.bridges[0].b = 2;
+    printed_map.mountainCount = 1;
+    strcpy(printed_map.mountains[0].name, "Peaks");
+    printed_map.mountains[0].territories[0] = 0;
+    printed_map.mountains[0].territories[1] = 6;
+    printed_map.mountains[0].territories[2] = 3;
+    printed_map.mountains[0].count = 3;
+    printed_map.adventureCardCount = 0;
+    for (c = 0; c < (int)(sizeof(adv) / sizeof(adv[0])); c++) {
+        struct MapAdventureCard *card =
+            &printed_map.adventureCards[printed_map.adventureCardCount++];
+        snprintf(card->id, sizeof(card->id), "%s", adv[c].id);
+        snprintf(card->kind, sizeof(card->kind), "%s", adv[c].kind);
+        snprintf(card->title, sizeof(card->title), "Card %s", adv[c].id);
+        snprintf(card->text, sizeof(card->text), "Card %s", adv[c].id);
+        snprintf(card->effect, sizeof(card->effect), "%s", adv[c].effect);
+        snprintf(card->args, sizeof(card->args), "%s", adv[c].args);
+    }
+    printed_map.rules.adventureStartHand = 4;
+    printed_map.rules.drawOnLeaderConquest = 1;
+}
+
+static int is_reactive(const char *effect)
+{
+    return strcmp(effect, "DEFENSE_BONUS") == 0 ||
+           strcmp(effect, "REROLL") == 0 ||
+           strcmp(effect, "CANCEL_EVENT") == 0 ||
+           strcmp(effect, "INVADED_REINFORCE") == 0 ||
+           strcmp(effect, "WITHDRAW") == 0 ||
+           strcmp(effect, "STORM_REPEL") == 0;
+}
+
 static int start_fuzz_game(struct Game *g, int players, int mode, int batch,
                            uint64_t seed, char *err, size_t err_size)
 {
     int i;
 
-    game_init(g, &fuzz_map, 1, "fuzz", "p0", seed);
+    game_init(g, active_map, 1, "fuzz", "p0", seed);
     for (i = 0; i < players; i++) {
         char name[16];
         snprintf(name, sizeof(name), "p%d", i);
@@ -159,6 +249,24 @@ static int start_fuzz_game(struct Game *g, int players, int mode, int batch,
         struct DiceRng rng;
         int seat;
         dice_seed(&rng, seed ^ UINT64_C(0xa5a5a5a55a5a5a5a));
+        if (printed_mode) {
+            /* The rulebook deal gave 4 cards; arm some standing orders. */
+            for (seat = 0; seat < g->player_count; seat++) {
+                int slot;
+                for (slot = 0; slot < g->seats[seat].adventure_hand_count;
+                     slot++) {
+                    const struct MapAdventureCard *mc = &g->map->adventureCards[
+                        g->seats[seat].adventure_hand[slot]];
+                    if (is_reactive(mc->effect)) {
+                        g->seats[seat].adventure_auto[slot] =
+                            (unsigned char)dice_range(&rng, 3);
+                        g->seats[seat].adventure_auto_n[slot] =
+                            (unsigned char)(1 + dice_range(&rng, 3));
+                    }
+                }
+            }
+            return 0;
+        }
         for (seat = 0; seat < g->player_count; seat++) {
             int n;
             for (n = 0; n < 2 && g->adventure_deck_count > 0; n++) {
@@ -320,9 +428,25 @@ static int check_invariants(const struct Game *g, char *why, size_t why_size)
             total++;
         }
     }
+    for (i = 0; i < g->player_count; i++) {
+        int c = g->seats[i].uprising_card;
+        if (c < 0) {
+            continue;
+        }
+        if (c >= map->territoryCardCount || seen[c]) {
+            snprintf(why, why_size, "bad uprising card %d", c);
+            return -1;
+        }
+        seen[c] = 1;
+        total++;
+    }
     if (total != map->territoryCardCount) {
         snprintf(why, why_size, "territory cards %d of %d", total,
                  map->territoryCardCount);
+        return -1;
+    }
+    if (g->bonus_pending < 0 || g->seats[0].oathbreakers < 0) {
+        snprintf(why, why_size, "negative printed-card state");
         return -1;
     }
     total = g->adventure_deck_count + g->adventure_discard_count;
@@ -494,6 +618,78 @@ static int pick_playable_card(struct Game *g, struct DiceRng *rng,
     slot = slots[pick_index(rng, count)];
     action->type = ACT_PLAY_CARD;
     action->card_a = slot;
+    {
+        const char *effect = g->map->adventureCards[
+            g->seats[g->current_player].adventure_hand[slot]].effect;
+        int me = g->current_player;
+        int from[GAME_MAX_TERRITORIES * GAME_MAX_TERRITORIES];
+        int to[GAME_MAX_TERRITORIES * GAME_MAX_TERRITORIES];
+        int n = 0, a, b;
+        if (strcmp(effect, "AMBUSH") == 0 || strcmp(effect, "GRIMA") == 0 ||
+            strcmp(effect, "NO_STRONGHOLD") == 0 ||
+            strcmp(effect, "SEABORNE_BONUS") == 0) {
+            for (a = 0; a < g->territory_count; a++) {
+                for (b = 0; b < g->territory_count; b++) {
+                    int land = 0, k;
+                    if (!legal->attack[a][b]) {
+                        continue;
+                    }
+                    for (k = 0; k < g->map->territories[a].adjacentCount; k++) {
+                        land |= g->map->territories[a].adjacent[k] == b;
+                    }
+                    if ((strcmp(effect, "GRIMA") == 0 &&
+                         g->territories[b].armies < 2) ||
+                        (strcmp(effect, "NO_STRONGHOLD") == 0 &&
+                         !g->map->territories[b].stronghold) ||
+                        (strcmp(effect, "SEABORNE_BONUS") == 0 &&
+                         (land || !map_has_link(g->map, a, b)))) {
+                        continue;
+                    }
+                    from[n] = a;
+                    to[n++] = b;
+                }
+            }
+        } else if (strcmp(effect, "MOUNTAIN_PASS") == 0) {
+            for (a = 0; a < g->territory_count; a++) {
+                for (b = 0; b < g->territory_count; b++) {
+                    if (g->territories[a].owner == me &&
+                        g->territories[a].armies >= 2 &&
+                        g->territories[b].owner != me &&
+                        g->territories[b].armies >= 1 &&
+                        !g->frozen_by[a] && !g->frozen_by[b] &&
+                        map_same_range(g->map, a, b)) {
+                        from[n] = a;
+                        to[n++] = b;
+                    }
+                }
+            }
+        } else if (strcmp(effect, "LEADER_MOVE") == 0) {
+            for (a = 0; a < g->territory_count; a++) {
+                for (b = 0; b < g->territory_count; b++) {
+                    if (a != b && g->territories[a].leader_of == me + 1 &&
+                        g->territories[b].owner == me &&
+                        g->territories[b].leader_of == 0) {
+                        from[n] = a;
+                        to[n++] = b;
+                    }
+                }
+            }
+        } else if (strcmp(effect, "BRIDGE_BLOCK") == 0) {
+            action->bridge = dice_range(rng, g->map->bridgeCount);
+            return 1;
+        } else {
+            n = -1;
+        }
+        if (n == 0) {
+            return 0;
+        }
+        if (n > 0) {
+            int pick = pick_index(rng, n);
+            action->from = from[pick];
+            action->to = to[pick];
+            return 1;
+        }
+    }
     if (strcmp(g->map->adventureCards[
                    g->seats[g->current_player].adventure_hand[slot]].effect,
                "RECRUIT_LEADER") == 0) {
@@ -538,6 +734,47 @@ static int choose_legal_action(struct Game *g, struct DiceRng *rng,
         return 1;
     }
     game_legal_actions(g, &legal);
+    if (legal.free_leader_pending || legal.bonus_pending > 0) {
+        int spots[GAME_MAX_TERRITORIES];
+        int spot_count = 0;
+        for (i = 0; i < g->territory_count; i++) {
+            if (legal.free_leader_pending ? legal.leader_placeable[i]
+                                          : legal.bonus_placeable[i]) {
+                spots[spot_count++] = i;
+            }
+        }
+        if (spot_count == 0) {
+            return 0;
+        }
+        action->territory = spots[pick_index(rng, spot_count)];
+        if (legal.free_leader_pending) {
+            action->type = ACT_PLACE_LEADER;
+        } else {
+            action->type = ACT_PLACE;
+            action->count = (g->bonus_area == BONUS_ANY ||
+                             g->bonus_area == BONUS_PORT)
+                ? g->bonus_pending : 1 + dice_range(rng, g->bonus_pending);
+        }
+        return 1;
+    }
+    for (i = 0; i < g->seats[g->current_player].adventure_hand_count; i++) {
+        if (legal.claimable_mission[i] && dice_range(rng, 2) == 0) {
+            action->type = ACT_CLAIM_MISSION;
+            action->card_a = i;
+            return 1;
+        }
+    }
+    if (legal.can_oathbreakers && dice_range(rng, 3) == 0) {
+        for (i = 0; i < g->territory_count; i++) {
+            for (j = 0; j < g->territory_count; j++) {
+                if (legal.attack[i][j]) {
+                    action->type = ACT_OATHBREAKERS;
+                    action->territory = i;
+                    return 1;
+                }
+            }
+        }
+    }
     switch (g->phase) {
     case PHASE_SETUP_CLAIM: {
         int candidates[GAME_MAX_TERRITORIES];
@@ -683,7 +920,8 @@ static int choose_legal_action(struct Game *g, struct DiceRng *rng,
             if (g->territories[action->from].leader_of ==
                     g->current_player + 1 &&
                 g->territories[action->to].leader_of == 0 &&
-                dice_range(rng, 2) == 1) {
+                (dice_range(rng, 2) == 1 ||
+                 legal.fortify[action->from][action->to] == 2)) {
                 action->leader = 1;
             }
             return 1;
@@ -726,6 +964,21 @@ static int run_legal_game(uint64_t seed, int player_count, int mode,
             snprintf(why, why_size, "no legal action in phase %d",
                      g.phase);
             return -1;
+        }
+        if (getenv("FUZZ_TRACE") != NULL && (actions >= max_actions - 40 || getenv("FUZZ_TRACE_ALL") != NULL)) {
+            int t, own[4] = {0, 0, 0, 0}, arm[4] = {0, 0, 0, 0};
+            for (t = 0; t < g.territory_count; t++) {
+                if (g.territories[t].owner >= 0) {
+                    own[g.territories[t].owner]++;
+                    arm[g.territories[t].owner] += g.territories[t].armies;
+                }
+            }
+            fprintf(stderr, "turn %d p%d phase %d act %d from %d to %d t %d n %d | "
+                    "lands %d/%d/%d/%d armies %d/%d/%d/%d pend %d bonus %d\n",
+                    g.turn, g.current_player, g.phase, action.type,
+                    action.from, action.to, action.territory, action.count,
+                    own[0], own[1], own[2], own[3], arm[0], arm[1], arm[2],
+                    arm[3], g.reinforcements_pending, g.bonus_pending);
         }
         if (game_apply(&g, g.current_player, &action, events, &count,
                        error, sizeof(error)) != 0) {
@@ -828,6 +1081,7 @@ static int run_arbitrary(int iterations, uint64_t seed,
 int main(int argc, char **argv)
 {
     int games = (argc > 1) ? atoi(argv[1]) : 1000;
+    int first = (argc > 3) ? atoi(argv[3]) : 0;
     int arbitrary = (argc > 2) ? atoi(argv[2]) : 10000;
     int failures = 0;
     int total_actions = 0;
@@ -836,24 +1090,31 @@ int main(int argc, char **argv)
     char why[256];
 
     build_fuzz_map();
+    build_printed_map();
     if (games < 1) {
         games = 1;
     }
     if (arbitrary < 0) {
         arbitrary = 0;
     }
-    for (i = 0; i < games; i++) {
+    for (i = first; i < first + games; i++) {
         uint64_t seed = UINT64_C(0x123456789abcdef) +
                         (uint64_t)i * UINT64_C(0x100000001b3);
         int players = 2 + (int)(seed % 3);
         int mode = (seed & 1) ? GAME_START_DRAFT : GAME_START_DEAL;
         int batch = 1 + (int)((seed >> 8) % 8);
         int actions = 0;
-        int rc = run_legal_game(seed, players, mode, batch, 20000,
-                                &actions, why, sizeof(why));
+        int rc;
+        printed_mode = i % 2;
+        active_map = printed_mode ? &printed_map : &fuzz_map;
+        /* Printed cards add many battalions, so random games run longer. */
+        rc = run_legal_game(seed, players, mode, batch,
+                            printed_mode ? 100000 : 20000,
+                            &actions, why, sizeof(why));
         if (rc != 0) {
-            fprintf(stderr, "FAIL game %d (seed %llu, %d players, mode %d): "
-                    "%s\n", i, (unsigned long long)seed, players, mode, why);
+            fprintf(stderr, "FAIL game %d (seed %llu, %d players, mode %d%s): "
+                    "%s\n", i, (unsigned long long)seed, players, mode,
+                    printed_mode ? ", printed cards" : "", why);
             failures++;
             if (failures >= 5) {
                 break;

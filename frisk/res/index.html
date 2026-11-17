@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FRISK</title>
-<link rel="stylesheet" href="css/frisk.css">
+<link rel="stylesheet" href="css/frisk.css?v=20261117f">
 </head>
 <body>
 <header id="topbar" class="topbar hidden">
@@ -96,7 +96,7 @@
         </div>
         <div class="row toggles">
           <label class="check"><input type="checkbox" id="dice-anim"> Animate dice</label>
-          <label class="check"><input type="checkbox" id="sfx-toggle"> Sound effects (dice, win/lose)</label>
+          <label class="check"><input type="checkbox" id="sfx-toggle"> Sound effects (dice, your turn, win/lose)</label>
         </div>
         <p id="alerts-msg" class="small muted"></p>
         <p id="profile-msg" class="msg"></p>
@@ -155,49 +155,56 @@
         <div id="map-container">
           <div id="map-stage"></div>
         </div>
-        <div id="dice-overlay" class="dice-overlay hidden" role="status" aria-live="polite" title="Click to dismiss"></div>
+        <div id="dice-overlay" class="dice-overlay hidden" role="status" aria-live="polite"></div>
         <div id="end-banner" class="end-banner hidden" role="dialog" aria-label="Game over"></div>
+        <div id="territory-info" class="territory-info hidden" aria-live="polite"></div>
         <div class="map-tools">
           <button type="button" class="secondary tiny" id="map-fit">Fit</button>
           <button type="button" class="secondary tiny" id="map-zoom-in">+</button>
           <button type="button" class="secondary tiny" id="map-zoom-out">−</button>
         </div>
       </div>
-      <aside class="side">
-        <div class="panel">
+      <aside class="side" id="game-side">
+        <div class="panel action-panel">
           <div id="phase-bar" class="phase-bar"></div>
           <div id="game-actions" class="actions"></div>
         </div>
-        <div class="panel">
-          <h2>Players</h2>
-          <div id="game-players"></div>
-        </div>
-        <div class="panel">
-          <h2>Cards</h2>
-          <div id="game-hand" class="hand"></div>
-        </div>
-        <div class="panel">
-          <h2>Adventure</h2>
-          <div id="game-adventure" class="adventure"></div>
-        </div>
-        <div class="panel">
-          <h2>Log</h2>
-          <div id="game-log" class="log"></div>
-        </div>
-        <div class="panel">
-          <h2>Chat</h2>
-          <div class="chat" id="game-chat">
-            <div class="chat-log" id="game-chat-log"></div>
-            <p class="chat-status small muted" id="game-chat-status"></p>
-            <form class="chat-form" id="game-chat-form">
-              <input id="game-chat-text" maxlength="500" autocomplete="off" placeholder="Message the table">
-              <button type="submit">Send</button>
-            </form>
-            <div class="chat-tools">
-              <div class="taunts" id="game-chat-taunts"></div>
-              <label class="small muted chat-autoplay"><input type="checkbox" id="game-chat-autoplay"> Autoplay new clips</label>
+        <nav class="side-tabs" id="side-tabs" aria-label="Game panels">
+          <button type="button" class="tab" data-tab="players">Players</button>
+          <button type="button" class="tab" data-tab="cards">Cards<span class="tab-badge hidden" id="badge-cards"></span></button>
+          <button type="button" class="tab" data-tab="log">Log<span class="tab-badge hidden" id="badge-log"></span></button>
+          <button type="button" class="tab" data-tab="chat">Chat<span class="tab-badge hidden" id="badge-chat"></span></button>
+        </nav>
+        <div class="tab-sheet" id="tab-sheet">
+          <div class="panel tab-panel" data-tab="players">
+            <h2>Players</h2>
+            <div id="game-players"></div>
+          </div>
+          <div class="panel tab-panel" data-tab="cards">
+            <h2>Cards</h2>
+            <div id="game-hand" class="hand"></div>
+            <h2 class="sub">Adventure</h2>
+            <div id="game-adventure" class="adventure"></div>
+          </div>
+          <div class="panel tab-panel" data-tab="log">
+            <h2>Log</h2>
+            <div id="game-log" class="log"></div>
+          </div>
+          <div class="panel tab-panel" data-tab="chat">
+            <h2>Chat</h2>
+            <div class="chat" id="game-chat">
+              <div class="chat-log" id="game-chat-log"></div>
+              <p class="chat-status small muted" id="game-chat-status"></p>
+              <form class="chat-form" id="game-chat-form">
+                <input id="game-chat-text" maxlength="500" autocomplete="off" placeholder="Message the table">
+                <button type="submit">Send</button>
+              </form>
+              <div class="chat-tools">
+                <div class="taunts" id="game-chat-taunts"></div>
+                <label class="small muted chat-autoplay"><input type="checkbox" id="game-chat-autoplay"> Autoplay new clips</label>
+              </div>
+              <div class="chat-voice" id="game-chat-voice"></div>
             </div>
-            <div class="chat-voice" id="game-chat-voice"></div>
           </div>
         </div>
       </aside>
@@ -222,7 +229,8 @@
 </main>
 
 <div id="toast" class="toast hidden"></div>
-<script src="js/voice.js" defer></script>
-<script src="js/app.js" defer></script>
+<div id="card-viewer" class="card-viewer hidden" title="Close"><img alt=""></div>
+<script src="js/voice.js?v=20261117f" defer></script>
+<script src="js/app.js?v=20261117f" defer></script>
 </body>
 </html>

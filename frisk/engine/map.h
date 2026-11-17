@@ -10,6 +10,13 @@
 #define MAP_MAX_FACTIONS 8
 #define MAP_MAX_LINKS 64
 #define MAP_MAX_PLAYERS 4
+#define MAP_MAX_BRIDGES 64
+#define MAP_MAX_MOUNTAINS 16
+
+/* Faction sides (printed cards: "a Good force", "the Evil force"). */
+#define MAP_SIDE_NONE 0
+#define MAP_SIDE_GOOD 1
+#define MAP_SIDE_EVIL 2
 
 #define MAP_NAME_SIZE 128
 #define MAP_TERRITORY_NAME_SIZE 64
@@ -37,6 +44,7 @@ struct MapFaction {
     char unit3[MAP_PATH_SIZE];
     char unit5[MAP_PATH_SIZE];
     char leader[MAP_PATH_SIZE];
+    int side;             /* MAP_SIDE_*; optional "side": "good" | "evil" */
 };
 
 struct MapRegion {
@@ -55,6 +63,7 @@ struct MapTerritory {
     int labelY;
     int stronghold;
     int site;
+    int port;             /* optional; ends of sea-lines on the LOTR board */
     int adjacent[MAP_MAX_ADJ];
     int adjacentCount;
 };
@@ -64,6 +73,19 @@ struct MapLink {
     int b;
     char kind[MAP_KIND_SIZE];
     char path[MAP_PATH_SIZE];
+};
+
+/* A bridge drawn across a river between two adjacent territories. */
+struct MapBridge {
+    int a;
+    int b;
+};
+
+/* A mountain range and the territories next to it. */
+struct MapMountain {
+    char name[MAP_TERRITORY_NAME_SIZE];
+    int territories[MAP_MAX_TERRITORIES];
+    int count;
 };
 
 struct MapTerritoryCard {
@@ -100,6 +122,8 @@ struct MapRules {
     int leadersPerPlayer;
     int leaderCost;       /* armies to recruit a replacement leader */
     int dieCap;           /* 0 means uncapped */
+    int adventureStartHand;   /* rulebook: adventure cards dealt at start */
+    int drawOnLeaderConquest; /* rulebook draw: a leader conquered a site */
 };
 
 struct Map {
@@ -114,6 +138,10 @@ struct Map {
     struct MapTerritory territories[MAP_MAX_TERRITORIES];
     int linkCount;
     struct MapLink links[MAP_MAX_LINKS];
+    int bridgeCount;
+    struct MapBridge bridges[MAP_MAX_BRIDGES];
+    int mountainCount;
+    struct MapMountain mountains[MAP_MAX_MOUNTAINS];
     int territoryCardCount;
     struct MapTerritoryCard territoryCards[MAP_MAX_CARDS];
     int adventureCardCount;
@@ -136,5 +164,10 @@ int map_find_territory(const struct Map *map, const char *name);
 int map_find_region(const struct Map *map, const char *name);
 int map_are_adjacent(const struct Map *map, int a, int b);
 int map_has_link(const struct Map *map, int a, int b);
+/* Index of the bridge joining a and b, or -1. */
+int map_bridge_index(const struct Map *map, int a, int b);
+/* 1 when a and b are both next to one mountain range. */
+int map_same_range(const struct Map *map, int a, int b);
+int map_faction_side(const struct Map *map, int faction);
 
 #endif

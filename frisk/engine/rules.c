@@ -493,6 +493,27 @@ static void clear_closed_links_for(struct Game *g, int player)
     }
 }
 
+/* Effects that last "until the start of your next turn" end when their
+ * owner leaves the game (otherwise a frozen territory stays frozen forever). */
+static void clear_printed_effects_for(struct Game *g, int player)
+{
+    int i;
+
+    if (g->toll_by == player + 1) {
+        g->toll_by = 0;
+    }
+    for (i = 0; i < GAME_MAX_TERRITORIES; i++) {
+        if (g->frozen_by[i] == player + 1) {
+            g->frozen_by[i] = 0;
+        }
+    }
+    for (i = 0; i < MAP_MAX_BRIDGES; i++) {
+        if (g->bridge_blocked_by[i] == player + 1) {
+            g->bridge_blocked_by[i] = 0;
+        }
+    }
+}
+
 static int site_is_claimed(const struct Game *g, int player, int territory)
 {
     int word = territory / 32;
@@ -804,6 +825,335 @@ static int cancel_event_auto(struct Game *g, struct EventSink *sink)
     return 0;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Printed adventure cards (PLAN.md 10b)                               */
+/* ------------------------------------------------------------------ */
+
+static void shuffle_array(struct DiceRng *rng, int *values, int count);
+static int has_recruit_spot(const struct Game *g, int player);
+
+static int adventure_arg_string(const struct MapAdventureCard *card,
+                                const char *key, char *out, size_t out_size)
+{
+    JsonValue *args = adventure_args(card);
+    const char *text = args != NULL ? json_get_string(json_get(args, key))
+                                    : NULL;
+    int ok = 0;
+
+    if (out_size > 0) {
+        out[0] = '\0';
+    }
+    if (text != NULL && out_size > 0) {
+        snprintf(out, out_size, "%s", text);
+        ok = 1;
+    }
+    json_free(args);
+    return ok;
+}
+
+static int player_side(const struct Game *g, int seat)
+{
+    if (seat < 0 || seat >= g->player_count) {
+        return MAP_SIDE_NONE;
+    }
+    return map_faction_side(g->map, g->seats[seat].faction);
+}
+
+static int land_adjacent(const struct Game *g, int a, int b)
+{
+    int i;
+
+    for (i = 0; i < g->map->territories[a].adjacentCount; i++) {
+        if (g->map->territories[a].adjacent[i] == b) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* An invasion along a sea-line (Black Sails, Corsairs, Violent Storms). */
+static int is_seaborne(const struct Game *g, int from, int to)
+{
+    return terrain_valid(g, from) && terrain_valid(g, to) &&
+           !land_adjacent(g, from, to) && find_link(g, from, to) >= 0;
+}
+
+static void reset_invasion(struct Game *g)
+{
+    g->inv_from = -1;
+    g->inv_to = -1;
+    g->inv_flags = 0;
+    g->inv_attack_bonus = 0;
+}
+
+static void declare_invasion(struct Game *g, int from, int to)
+{
+    if (g->inv_from != from || g->inv_to != to) {
+        reset_invasion(g);
+        g->inv_from = from;
+        g->inv_to = to;
+    }
+}
+
+static int bridge_blocked(const struct Game *g, int a, int b)
+{
+    int bridge = map_bridge_index(g->map, a, b);
+
+    return bridge >= 0 && bridge < MAP_MAX_BRIDGES &&
+           g->bridge_blocked_by[bridge] != 0;
+}
+
+/* Can `player` invade from `from` into `to` right now?  Adds the printed
+ * cards to plain adjacency: Winter Storms freezes territories, a blocked
+ * bridge needs the player's Leader in the invading territory, and The Way Is
+ * Under the Mountains opens one declared invasion across a range. */
+int game_attack_route(const struct Game *g, int player, int from, int to)
+{
+    if (g == NULL || !terrain_valid(g, from) || !terrain_valid(g, to)) {
+        return 0;
+    }
+    if (g->frozen_by[from] != 0 || g->frozen_by[to] != 0) {
+        return 0;
+    }
+    if (game_territories_connected(g, from, to)) {
+        return !bridge_blocked(g, from, to) ||
+               g->territories[from].leader_of == player + 1;
+    }
+    return g->inv_from == from && g->inv_to == to &&
+           (g->inv_flags & INV_MOUNTAIN) != 0;
+}
+
+static int draw_territory_card(struct Game *g)
+{
+    if (g->deck_count == 0 && g->discard_count > 0) {
+        memcpy(g->deck, g->discard, sizeof(int) * (size_t)g->discard_count);
+        g->deck_count = g->discard_count;
+        g->discard_count = 0;
+        shuffle_array(&g->rng, g->deck, g->deck_count);
+    }
+    if (g->deck_count <= 0) {
+        return -1;
+    }
+    return g->deck[--g->deck_count];
+}
+
+static void discard_territory_card(struct Game *g, int card)
+{
+    if (card >= 0 && g->discard_count < GAME_MAX_CARDS) {
+        g->discard[g->discard_count++] = card;
+    }
+}
+
+static int card_territory(const struct Game *g, int card)
+{
+    if (!card_valid(g, card) || g->map->territoryCards[card].wild) {
+        return -1;
+    }
+    return g->map->territoryCards[card].territory;
+}
+
+/* "Draw the top N Territory cards": territories (-1 for a wild) go to out,
+ * the cards to the discard pile. */
+static int draw_event_territories(struct Game *g, int n, int *out)
+{
+    int count = 0;
+
+    while (count < n) {
+        int card = draw_territory_card(g);
+        if (card < 0) {
+            break;
+        }
+        out[count++] = card_territory(g, card);
+        discard_territory_card(g, card);
+    }
+    return count;
+}
+
+/* Local Uprising: "When you control that Territory, reveal the card and add
+ * 4 battalions to that Territory." */
+static void check_uprisings(struct Game *g, struct EventSink *sink)
+{
+    int seat;
+
+    for (seat = 0; seat < g->player_count; seat++) {
+        struct Seat *s = &g->seats[seat];
+        int t;
+        struct Event *event;
+        if (!s->alive || s->uprising_card < 0) {
+            continue;
+        }
+        t = card_territory(g, s->uprising_card);
+        if (t < 0 || g->territories[t].owner != seat) {
+            continue;
+        }
+        g->territories[t].armies += s->uprising_bonus;
+        discard_territory_card(g, s->uprising_card);
+        s->uprising_card = -1;
+        event = sink_new(sink, EVENT_ADVENTURE, seat);
+        if (event != NULL) {
+            event->to = t;
+            event->count = s->uprising_bonus;
+            event_text(event, "Local Uprising: %s revealed %s and added %d "
+                       "battalions", seat_name(g, seat), territory_name(g, t),
+                       s->uprising_bonus);
+        }
+        s->uprising_bonus = 0;
+    }
+}
+
+static void lose_armies(struct Game *g, int t, int loss)
+{
+    g->territories[t].armies -= loss;
+    if (g->territories[t].armies < 1) {
+        g->territories[t].armies = 1;   /* "1 battalion must always remain" */
+    }
+}
+
+/* The printed events that "play immediately".  Returns 1 when handled. */
+static int resolve_printed_event(struct Game *g, int drawer, int card,
+                                 const struct MapAdventureCard *mc,
+                                 struct EventSink *sink)
+{
+    struct Event *event = NULL;
+    int list[8];
+    int count, i, n;
+    char text[192];
+    size_t used;
+
+    if (strcmp(mc->effect, "FREE_LEADER") == 0) {
+        int limit = adventure_arg_int(mc, "max", 2);
+        event = sink_new(sink, EVENT_ADVENTURE, drawer);
+        if (g->seats[drawer].leaders_in_play < limit &&
+            has_recruit_spot(g, drawer)) {
+            g->pending_free_leader = 1;
+            if (event != NULL) {
+                event_text(event, "%s: %s places a second Leader",
+                           mc->title, seat_name(g, drawer));
+            }
+        } else if (event != NULL) {
+            event_text(event, "%s: %s already has %d Leaders; discarded",
+                       mc->title, seat_name(g, drawer), limit);
+        }
+    } else if (strcmp(mc->effect, "SIDE_CONTROL") == 0) {
+        int t = adventure_arg_territory(g, mc, "territory");
+        char side_name[16];
+        int side, owner;
+        adventure_arg_string(mc, "side", side_name, sizeof(side_name));
+        side = strcmp(side_name, "evil") == 0 ? MAP_SIDE_EVIL : MAP_SIDE_GOOD;
+        if (t < 0) {
+            return 1;
+        }
+        owner = g->territories[t].owner;
+        event = sink_new(sink, EVENT_ADVENTURE, drawer);
+        if (event != NULL) {
+            event->to = t;
+        }
+        if (owner >= 0 && player_side(g, owner) == side) {
+            n = adventure_arg_int(mc, "gain", 0);
+            g->territories[t].armies += n;
+            if (event != NULL) {
+                event_text(event, "%s: %s receives %d battalions in %s",
+                           mc->title, seat_name(g, owner), n,
+                           territory_name(g, t));
+            }
+        } else if (owner >= 0 && player_side(g, owner) != MAP_SIDE_NONE) {
+            n = adventure_arg_int(mc, "loss", 0);
+            lose_armies(g, t, n);
+            if (event != NULL) {
+                event_text(event, "%s: %s loses %d battalions in %s",
+                           mc->title, seat_name(g, owner), n,
+                           territory_name(g, t));
+            }
+        } else if (event != NULL) {
+            event_text(event, "%s: no effect on %s", mc->title,
+                       territory_name(g, t));
+        }
+    } else if (strcmp(mc->effect, "SEABORNE_TOLL") == 0) {
+        g->toll_by = drawer + 1;
+        g->toll_loss = adventure_arg_int(mc, "loss", 3);
+        event = sink_new(sink, EVENT_ADVENTURE, drawer);
+        if (event != NULL) {
+            event_text(event, "%s: until %s's next turn every seaborne "
+                       "invasion loses %d battalions first", mc->title,
+                       seat_name(g, drawer), g->toll_loss);
+        }
+    } else if (strcmp(mc->effect, "LOCAL_UPRISING") == 0) {
+        struct Seat *seat = &g->seats[drawer];
+        int drawn = -1;
+        int tries = g->map->territoryCardCount;   /* only wilds may be left */
+        while (seat->uprising_card < 0 && tries-- > 0) {
+            drawn = draw_territory_card(g);
+            if (drawn < 0) {
+                break;
+            }
+            if (card_territory(g, drawn) >= 0) {
+                seat->uprising_card = drawn;
+                seat->uprising_bonus = adventure_arg_int(mc, "n", 4);
+                break;
+            }
+            discard_territory_card(g, drawn);   /* a wild names no land */
+        }
+        event = sink_new(sink, EVENT_ADVENTURE, drawer);
+        if (event != NULL) {
+            event_text(event, "%s: %s secretly drew a Territory card",
+                       mc->title, seat_name(g, drawer));
+        }
+    } else if (strcmp(mc->effect, "RAIDERS") == 0 ||
+               strcmp(mc->effect, "MUSTERING") == 0 ||
+               strcmp(mc->effect, "WINTER_STORMS") == 0) {
+        int raid = strcmp(mc->effect, "RAIDERS") == 0;
+        int muster = strcmp(mc->effect, "MUSTERING") == 0;
+        n = adventure_arg_int(mc, "n", 3);
+        count = draw_event_territories(g, min_int(8, adventure_arg_int(
+                                           mc, "cards", 3)), list);
+        used = (size_t)snprintf(text, sizeof(text), "%s:", mc->title);
+        for (i = 0; i < count; i++) {
+            int t = list[i];
+            int change = 0;
+            if (t < 0) {
+                used += (size_t)snprintf(text + used, used < sizeof(text) ?
+                                         sizeof(text) - used : 0,
+                                         "%s a wild card", i ? "," : "");
+                continue;
+            }
+            if (raid) {
+                change = g->territories[t].armies / 2;
+                lose_armies(g, t, change);
+            } else if (muster) {
+                change = n;
+                g->territories[t].armies += n;
+            } else {
+                g->frozen_by[t] = drawer + 1;
+            }
+            used += (size_t)snprintf(text + used, used < sizeof(text) ?
+                                     sizeof(text) - used : 0, "%s %s%s",
+                                     i ? "," : "", territory_name(g, t),
+                                     raid ? " (-" : muster ? " (+" : "");
+            if (raid || muster) {
+                used += (size_t)snprintf(text + used, used < sizeof(text) ?
+                                         sizeof(text) - used : 0, "%d)",
+                                         change);
+            }
+        }
+        if (!raid && !muster && used < sizeof(text)) {
+            snprintf(text + used, sizeof(text) - used,
+                     " frozen until %s's next turn", seat_name(g, drawer));
+        }
+        event = sink_new(sink, EVENT_ADVENTURE, drawer);
+        if (event != NULL) {
+            event->to = count > 0 ? list[0] : -1;
+            event_text(event, "%s", text);
+        }
+    } else {
+        return 0;
+    }
+    if (event != NULL) {
+        event->card_a = card;
+    }
+    return 1;
+}
+
 static void resolve_event_effect(struct Game *g, int drawer, int card,
                                  struct EventSink *sink)
 {
@@ -811,6 +1161,9 @@ static void resolve_event_effect(struct Game *g, int drawer, int card,
     struct Event *event;
 
     if (mc == NULL) {
+        return;
+    }
+    if (resolve_printed_event(g, drawer, card, mc, sink)) {
         return;
     }
     if (strcmp(mc->effect, "REGION_ATTRITION") == 0) {
@@ -956,6 +1309,57 @@ static void draw_adventure(struct Game *g, int player, int source,
             }
         }
     }
+}
+
+/* Rulebook step 5: draw 1 adventure card; Events play immediately and the
+ * drawing continues until a Mission or Power card is drawn.  Returns 1 while
+ * the chain waits for the player (a free leader to place). */
+static int run_rulebook_draws(struct Game *g, int player,
+                              struct EventSink *sink)
+{
+    int draws = 0;
+
+    while (g->draw_pending) {
+        int card;
+        const struct MapAdventureCard *mc;
+        struct Event *event;
+
+        if (g->pending_free_leader) {
+            return 1;
+        }
+        /* If every Mission and Power card is in someone's hand, only events
+         * are left to draw: stop instead of reshuffling them forever. */
+        card = ++draws > g->map->adventureCardCount ? -1
+                                                     : draw_adventure_index(g);
+        if (card < 0) {
+            g->draw_pending = 0;
+            event = sink_new(sink, EVENT_ADVENTURE, player);
+            if (event != NULL) {
+                event_text(event, "The adventure deck is empty");
+            }
+            break;
+        }
+        mc = adventure_card_at(g, card);
+        if (mc == NULL) {
+            adventure_discard_push(g, card);
+            continue;
+        }
+        event = sink_new(sink, EVENT_ADVENTURE, player);
+        if (event != NULL) {
+            event->card_a = card;
+            event_text(event, "%s drew %s", seat_name(g, player), mc->title);
+        }
+        if (strcmp(mc->kind, "event") == 0) {
+            if (!cancel_event_auto(g, sink)) {
+                resolve_event_effect(g, player, card, sink);
+            }
+            adventure_discard_push(g, card);
+            continue;
+        }
+        seat_add_adventure(g, player, card);
+        g->draw_pending = 0;
+    }
+    return g->pending_free_leader ? 1 : 0;
 }
 
 static int mission_reward(const struct MapAdventureCard *mc)
@@ -1188,6 +1592,13 @@ static void begin_turn_state(struct Game *g, int player,
 
     clear_closed_links_for(g, player);
     g->seats[player].attack_bonus = 0;
+    clear_printed_effects_for(g, player);   /* "until your next turn" */
+    reset_invasion(g);
+    g->leader_conquered_site = 0;
+    g->draw_pending = 0;
+    g->pending_free_leader = 0;
+    g->bonus_pending = 0;
+    g->bonus_area = BONUS_NONE;
     compute_reinforce_base(g, player, &info);
     info.card_bonus = g->deferred_card_bonus[player];
     info.total = info.base + info.region_bonus + info.stronghold_bonus +
@@ -1330,6 +1741,75 @@ static int first_pool_player(const struct Game *g)
     return -1;
 }
 
+/* Rulebook: "Remove the Event cards from the Adventure card deck and set
+ * these aside. Then deal 4 Adventure cards, facedown, to each player.
+ * Return the Event cards to the Adventure card deck, shuffle." */
+static void deal_start_adventures(struct Game *g)
+{
+    int hand = g->map->rules.adventureStartHand;
+    int keep[GAME_MAX_CARDS];
+    int keep_count = 0;
+    int i, seat, dealt;
+
+    if (hand <= 0) {
+        return;
+    }
+    for (i = 0; i < g->adventure_deck_count; i++) {
+        const struct MapAdventureCard *mc =
+            adventure_card_at(g, g->adventure_deck[i]);
+        if (mc != NULL && strcmp(mc->kind, "event") == 0) {
+            keep[keep_count++] = g->adventure_deck[i];   /* set aside */
+        }
+    }
+    dealt = 0;
+    for (i = 0; i < g->adventure_deck_count; i++) {
+        int card = g->adventure_deck[i];
+        const struct MapAdventureCard *mc = adventure_card_at(g, card);
+        if (mc == NULL || strcmp(mc->kind, "event") == 0) {
+            continue;
+        }
+        seat = dealt / hand;
+        if (seat < g->player_count) {
+            struct Seat *s = &g->seats[seat];
+            s->adventure_hand[s->adventure_hand_count] = card;
+            s->adventure_auto[s->adventure_hand_count] = 0;
+            s->adventure_auto_n[s->adventure_hand_count] = 0;
+            s->adventure_hand_count++;
+            dealt++;
+        } else {
+            keep[keep_count++] = card;
+        }
+    }
+    memcpy(g->adventure_deck, keep, sizeof(int) * (size_t)keep_count);
+    g->adventure_deck_count = keep_count;
+    shuffle_array(&g->rng, g->adventure_deck, g->adventure_deck_count);
+}
+
+void game_rebuild_adventure_deck(struct Game *g)
+{
+    int i;
+
+    if (g == NULL || g->map == NULL) {
+        return;
+    }
+    for (i = 0; i < g->player_count; i++) {
+        g->seats[i].adventure_hand_count = 0;
+        memset(g->seats[i].adventure_auto, 0,
+               sizeof(g->seats[i].adventure_auto));
+        memset(g->seats[i].adventure_auto_n, 0,
+               sizeof(g->seats[i].adventure_auto_n));
+    }
+    g->adventure_deck_count = g->map->adventureCardCount;
+    for (i = 0; i < g->adventure_deck_count; i++) {
+        g->adventure_deck[i] = i;
+    }
+    g->adventure_discard_count = 0;
+    shuffle_array(&g->rng, g->adventure_deck, g->adventure_deck_count);
+    if (g->status == GAME_RUNNING) {
+        deal_start_adventures(g);
+    }
+}
+
 static int seat_has_faction(const struct Game *g, int faction)
 {
     int i;
@@ -1361,6 +1841,8 @@ void game_init(struct Game *g, const struct Map *map, int id,
     g->pending_from = -1;
     g->pending_to = -1;
     g->kick_target = -1;
+    g->inv_from = -1;
+    g->inv_to = -1;
     g->start_mode = GAME_START_DEAL;
     g->setup_batch_size = 5;
     copy_text(g->name, sizeof(g->name), name);
@@ -1440,6 +1922,7 @@ int game_join(struct Game *g, const char *username, int faction,
     seat = &g->seats[g->player_count];
     memset(seat, 0, sizeof(*seat));
     copy_text(seat->username, sizeof(seat->username), username);
+    seat->uprising_card = -1;
     seat->faction = faction;
     seat->alive = 0;
     g->player_count++;
@@ -1640,6 +2123,14 @@ int game_start(struct Game *g, int start_mode, int placement_batch,
     }
     shuffle_array(&g->rng, g->adventure_deck, g->adventure_deck_count);
     g->adventure_discard_count = 0;
+    for (i = 0; i < g->player_count; i++) {
+        g->seats[i].uprising_card = -1;
+        g->seats[i].uprising_bonus = 0;
+        g->seats[i].oathbreakers = 0;
+        g->seats[i].extra_card_draws = 0;
+    }
+    reset_invasion(g);
+    deal_start_adventures(g);
 
     if (setup->neutral) {
         int share = setup->neutralSharePercent;
@@ -1787,6 +2278,7 @@ static void eliminate_player(struct Game *g, int player, int conqueror,
     g->seats[player].alive = 0;
     clear_kick_vote_for(g, player);
     clear_closed_links_for(g, player);
+    clear_printed_effects_for(g, player);
     /* Territory cards go to the conqueror. */
     for (i = 0; i < g->seats[player].hand_count; i++) {
         int card = g->seats[player].hand[i];
@@ -1806,6 +2298,9 @@ static void eliminate_player(struct Game *g, int player, int conqueror,
         }
     }
     g->seats[player].adventure_hand_count = 0;
+    discard_territory_card(g, g->seats[player].uprising_card);
+    g->seats[player].uprising_card = -1;
+    g->seats[player].oathbreakers = 0;
     for (i = 0; i < g->territory_count; i++) {
         if (g->territories[i].leader_of == player + 1) {
             g->territories[i].leader_of = 0;
@@ -1861,6 +2356,31 @@ static int apply_claim(struct Game *g, int player, const struct Action *a,
     return 0;
 }
 
+static int area_target_ok(const struct Game *g, int player, int t,
+                          int area, int area_id)
+{
+    if (!terrain_valid(g, t) || g->territories[t].owner != player) {
+        return 0;
+    }
+    switch (area) {
+    case BONUS_ANY:
+        return 1;
+    case BONUS_REGION:
+        return g->map->territories[t].region == area_id;
+    case BONUS_TERRITORY:
+        return t == area_id;
+    case BONUS_PORT:
+        return g->map->territories[t].port;
+    default:
+        return 0;
+    }
+}
+
+static int bonus_target_ok(const struct Game *g, int player, int t)
+{
+    return area_target_ok(g, player, t, g->bonus_area, g->bonus_area_id);
+}
+
 static int apply_place(struct Game *g, int player, const struct Action *a,
                        struct EventSink *sink, char *err, size_t err_size)
 {
@@ -1879,6 +2399,34 @@ static int apply_place(struct Game *g, int player, const struct Action *a,
     if (amount < 1) {
         set_error(err, err_size, "must place at least one army");
         return -1;
+    }
+    if (g->bonus_pending > 0) {
+        if (!bonus_target_ok(g, player, t)) {
+            set_error(err, err_size, "mission battalions cannot go there");
+            return -1;
+        }
+        if (amount > g->bonus_pending ||
+            ((g->bonus_area == BONUS_ANY || g->bonus_area == BONUS_PORT) &&
+             amount != g->bonus_pending)) {
+            set_error(err, err_size, g->bonus_area == BONUS_ANY ||
+                      g->bonus_area == BONUS_PORT
+                      ? "place all mission battalions in one territory"
+                      : "not that many mission battalions");
+            return -1;
+        }
+        g->territories[t].armies += amount;
+        g->bonus_pending -= amount;
+        if (g->bonus_pending == 0) {
+            g->bonus_area = BONUS_NONE;
+        }
+        event = sink_new(sink, EVENT_PLACE, player);
+        if (event != NULL) {
+            event->to = t;
+            event->count = amount;
+            event_text(event, "%s placed %d mission battalions in %s",
+                       seat_name(g, player), amount, territory_name(g, t));
+        }
+        return 0;
     }
     if (g->phase == PHASE_SETUP_PLACE) {
         if (amount > g->setup_pool[player] ||
@@ -1935,6 +2483,25 @@ static int apply_place_leader(struct Game *g, int player,
     int target;
     struct Event *event;
 
+    if (g->pending_free_leader) {
+        if (!terrain_valid(g, t) || g->territories[t].owner != player ||
+            g->territories[t].armies < 1 ||
+            g->territories[t].leader_of != 0) {
+            set_error(err, err_size,
+                      "choose your own territory without a leader");
+            return -1;
+        }
+        g->territories[t].leader_of = player + 1;
+        g->seats[player].leaders_in_play++;
+        g->pending_free_leader = 0;
+        event = sink_new(sink, EVENT_PLACE_LEADER, player);
+        if (event != NULL) {
+            event->to = t;
+            event_text(event, "%s appointed a second Leader in %s",
+                       seat_name(g, player), territory_name(g, t));
+        }
+        return 0;
+    }
     if (g->phase != PHASE_SETUP_LEADERS) {
         set_error(err, err_size, "not in the leader placement phase");
         return -1;
@@ -2146,6 +2713,9 @@ static void apply_battle_modifiers(struct Game *g, int player, int defender,
                                    struct EventSink *sink)
 {
     int stronghold = g->map->territories[to].stronghold;
+    int stronghold_counts = stronghold &&
+        !(g->inv_from == from && g->inv_to == to &&
+          (g->inv_flags & INV_NO_STRONGHOLD));
     int attacker_bonus = 0;
     int defender_bonus = 0;
     int amount = 0;
@@ -2174,8 +2744,11 @@ static void apply_battle_modifiers(struct Game *g, int player, int defender,
         g->territories[to].leader_of == defender + 1) {
         defender_bonus++;
     }
-    if (stronghold) {
+    if (stronghold_counts) {
         defender_bonus++;
+    }
+    if (g->inv_from == from && g->inv_to == to) {
+        attacker_bonus += g->inv_attack_bonus;   /* Black Sails */
     }
     if (round == 0 && defender >= 0 &&
         take_reactive_card(g, defender, "DEFENSE_BONUS", stronghold,
@@ -2213,8 +2786,14 @@ static int apply_attack(struct Game *g, int player, const struct Action *a,
         set_error(err, err_size, "you cannot attack your own territory");
         return -1;
     }
-    if (!game_territories_connected(g, from, to)) {
-        set_error(err, err_size, "territories are not adjacent");
+    if (!game_attack_route(g, player, from, to)) {
+        set_error(err, err_size, g->frozen_by[from] || g->frozen_by[to]
+                  ? "Winter Storms: no invasions into or out of that "
+                    "territory"
+                  : bridge_blocked(g, from, to)
+                  ? "the bridge is blocked; only a Leader can lead "
+                    "battalions across"
+                  : "territories are not adjacent");
         return -1;
     }
     if (g->territories[from].armies < 2) {
@@ -2236,13 +2815,80 @@ static int apply_attack(struct Game *g, int player, const struct Action *a,
         return -1;
     }
 
+    defender_seat = g->territories[to].owner;
+    old_owner = defender_seat;
+    declare_invasion(g, from, to);
+    if (!(g->inv_flags & INV_STARTED)) {
+        int seaborne = is_seaborne(g, from, to);
+        int stronghold = g->map->territories[to].stronghold;
+        int amount = 0;
+        struct Event *note;
+
+        g->inv_flags |= INV_STARTED;
+        if (seaborne && g->toll_by != 0) {
+            /* Corsairs of Umbar: lose 3 before invading (1 remains). */
+            lose_armies(g, from, g->toll_loss);
+            note = sink_new(sink, EVENT_ADVENTURE, player);
+            if (note != NULL) {
+                note->from = from;
+                note->to = to;
+                event_text(note, "Corsairs of Umbar: the seaborne invasion "
+                           "from %s lost %d battalions", territory_name(g, from),
+                           g->toll_loss);
+            }
+            if (g->territories[from].armies < 2) {
+                reset_invasion(g);
+                return 0;
+            }
+        }
+        if (defender_seat >= 0 && g->seats[defender_seat].alive) {
+            if (take_reactive_card(g, defender_seat, "INVADED_REINFORCE",
+                                   stronghold, attacker_dice, sink,
+                                   &amount)) {
+                g->territories[to].armies += amount;
+            }
+            if (g->territories[to].armies > 1) {
+                int best = -1;
+                int i;
+                for (i = 0; i < g->map->territories[to].adjacentCount; i++) {
+                    int n = g->map->territories[to].adjacent[i];
+                    if (g->territories[n].owner == defender_seat &&
+                        (best < 0 || g->territories[n].armies >
+                         g->territories[best].armies)) {
+                        best = n;
+                    }
+                }
+                if (best >= 0 &&
+                    take_reactive_card(g, defender_seat, "WITHDRAW",
+                                       stronghold, attacker_dice, sink,
+                                       &amount)) {
+                    int moved = g->territories[to].armies - 1;
+                    g->territories[to].armies = 1;
+                    g->territories[best].armies += moved;
+                    note = sink_new(sink, EVENT_ADVENTURE, defender_seat);
+                    if (note != NULL) {
+                        note->from = to;
+                        note->to = best;
+                        note->count = moved;
+                        event_text(note, "Strategic Withdrawal: %s moved %d "
+                                   "battalions from %s to %s",
+                                   seat_name(g, defender_seat), moved,
+                                   territory_name(g, to),
+                                   territory_name(g, best));
+                    }
+                }
+            }
+        }
+        if (attacker_dice > g->territories[from].armies - 1) {
+            attacker_dice = g->territories[from].armies - 1;
+        }
+    }
+
     memset(&event, 0, sizeof(event));
     event.kind = EVENT_ATTACK;
     event.player = player;
     event.from = from;
     event.to = to;
-    defender_seat = g->territories[to].owner;
-    old_owner = defender_seat;
 
     while (rounds < GAME_MAX_BLITZ_ROUNDS) {
         struct DiceBattle battle;
@@ -2284,6 +2930,20 @@ static int apply_attack(struct Game *g, int player, const struct Action *a,
         apply_battle_modifiers(g, player, defender_seat, from, to, rounds,
                                &battle, sink);
         pairs = min_int(a_count, d_count);
+        if (!(g->inv_flags & INV_STORM_DONE) && defender_seat >= 0 &&
+            g->seats[defender_seat].alive && is_seaborne(g, from, to) &&
+            g->map->territories[to].port) {
+            int unused = 0;
+            if (take_reactive_card(g, defender_seat, "STORM_REPEL",
+                                   g->map->territories[to].stronghold,
+                                   a_count, sink, &unused)) {
+                /* Violent Storms: all attacking battalions in this battle
+                 * are destroyed. */
+                g->inv_flags |= INV_STORM_DONE;
+                pairs = 0;
+                attacker_losses = a_count;
+            }
+        }
         for (i = 0; i < pairs; i++) {
             int a_value = battle.attacker[i] +
                 (i == 0 ? battle.attacker_bonus : 0);
@@ -2423,8 +3083,15 @@ static int apply_move_in(struct Game *g, int player, const struct Action *a,
         g->territories[from].leader_of = 0;
         g->territories[to].leader_of = player + 1;
         check_missions(g, player, MISSION_TRIGGER_LEADER, sink);
-        grant_site_draw(g, player, to, sink);
+        if (g->map->rules.drawOnLeaderConquest) {
+            if (g->map->territories[to].site) {
+                g->leader_conquered_site = 1;
+            }
+        } else {
+            grant_site_draw(g, player, to, sink);
+        }
     }
+    reset_invasion(g);
     event = sink_new(sink, EVENT_MOVE_IN, player);
     if (event != NULL) {
         event->from = from;
@@ -2453,13 +3120,27 @@ static int apply_done_attack(struct Game *g, struct EventSink *sink,
     }
     g->phase = PHASE_FORTIFY;
     g->fortified_this_turn = 0;
+    reset_invasion(g);
     event = sink_new(sink, EVENT_PHASE_CHANGE, g->current_player);
     event_text(event, "%s enters the fortify phase",
                seat_name(g, g->current_player));
     return 0;
 }
 
+static int fortify_path(const struct Game *g, int player, int from, int to,
+                        int with_leader);
+
 int game_can_fortify(const struct Game *g, int player, int from, int to)
+{
+    if (g == NULL || !terrain_valid(g, from)) {
+        return 0;
+    }
+    return fortify_path(g, player, from, to,
+                        g->territories[from].leader_of == player + 1);
+}
+
+static int fortify_path(const struct Game *g, int player, int from, int to,
+                        int with_leader)
 {
     int queue[GAME_MAX_TERRITORIES];
     int seen[GAME_MAX_TERRITORIES];
@@ -2486,7 +3167,8 @@ int game_can_fortify(const struct Game *g, int player, int from, int to)
         for (neighbor = 0; neighbor < g->territory_count; neighbor++) {
             if (!seen[neighbor] &&
                 game_territories_connected(g, current, neighbor) &&
-                g->territories[neighbor].owner == player) {
+                g->territories[neighbor].owner == player &&
+                (with_leader || !bridge_blocked(g, current, neighbor))) {
                 seen[neighbor] = 1;
                 queue[tail++] = neighbor;
             }
@@ -2525,9 +3207,12 @@ static int apply_fortify(struct Game *g, int player, const struct Action *a,
         set_error(err, err_size, "invalid number of armies");
         return -1;
     }
-    if (!game_can_fortify(g, player, from, to)) {
-        set_error(err, err_size,
-                  "no path of your own territories connects them");
+    if (!fortify_path(g, player, from, to, a->leader)) {
+        set_error(err, err_size, !a->leader &&
+                  g->territories[from].leader_of == player + 1 &&
+                  fortify_path(g, player, from, to, 1)
+                  ? "a blocked bridge is on the way: bring the Leader along"
+                  : "no path of your own territories connects them");
         return -1;
     }
     if (a->leader) {
@@ -2547,7 +3232,9 @@ static int apply_fortify(struct Game *g, int player, const struct Action *a,
         g->territories[from].leader_of = 0;
         g->territories[to].leader_of = player + 1;
         check_missions(g, player, MISSION_TRIGGER_LEADER, sink);
-        grant_site_draw(g, player, to, sink);
+        if (!g->map->rules.drawOnLeaderConquest) {
+            grant_site_draw(g, player, to, sink);
+        }
     }
     if (g->fortified_this_turn) {
         if (g->extra_fortifies > 0) {
@@ -2586,6 +3273,9 @@ static void discard_hand(struct Game *g, int player)
         }
     }
     g->seats[player].adventure_hand_count = 0;
+    discard_territory_card(g, g->seats[player].uprising_card);
+    g->seats[player].uprising_card = -1;
+    g->seats[player].oathbreakers = 0;
 }
 
 static int apply_end_turn(struct Game *g, struct EventSink *sink,
@@ -2612,13 +3302,36 @@ static int apply_end_turn(struct Game *g, struct EventSink *sink,
         set_error(err, err_size, "discard down to four adventure cards first");
         return -1;
     }
+    if (g->pending_free_leader) {
+        set_error(err, err_size, "place your free Leader first");
+        return -1;
+    }
+    if (g->bonus_pending > 0) {
+        set_error(err, err_size, "place your mission battalions first");
+        return -1;
+    }
     {
         int i;
-        for (i = 0; i < g->territory_count; i++) {
-            if (g->territories[i].owner == g->current_player &&
-                g->territories[i].leader_of == g->current_player + 1 &&
-                g->map->territories[i].site) {
-                grant_site_draw(g, g->current_player, i, sink);
+        if (g->map->rules.drawOnLeaderConquest) {
+            if (g->leader_conquered_site) {
+                g->leader_conquered_site = 0;
+                g->draw_pending = 1;
+            }
+            if (run_rulebook_draws(g, g->current_player, sink)) {
+                event = sink_new(sink, EVENT_END_TURN, g->current_player);
+                if (event != NULL) {
+                    event_text(event, "%s must place a Leader before ending "
+                               "the turn", seat_name(g, g->current_player));
+                }
+                return 0;
+            }
+        } else {
+            for (i = 0; i < g->territory_count; i++) {
+                if (g->territories[i].owner == g->current_player &&
+                    g->territories[i].leader_of == g->current_player + 1 &&
+                    g->map->territories[i].site) {
+                    grant_site_draw(g, g->current_player, i, sink);
+                }
             }
         }
         if (g->must_discard_adventure) {
@@ -2653,6 +3366,31 @@ static int apply_end_turn(struct Game *g, struct EventSink *sink,
             }
         }
     }
+    {
+        /* Edoras, Harlond, Lothlórien: an extra Territory card at the end of
+         * the turn, up to a maximum of 5 in hand. */
+        struct Seat *seat = &g->seats[g->current_player];
+        while (seat->extra_card_draws > 0) {
+            int card;
+            seat->extra_card_draws--;
+            if (seat->hand_count >= 5) {
+                continue;
+            }
+            card = draw_territory_card(g);
+            if (card < 0) {
+                continue;
+            }
+            seat->hand[seat->hand_count++] = card;
+            event = sink_new(sink, EVENT_DRAW_CARD, g->current_player);
+            if (event != NULL) {
+                event->card_a = card;
+                event_text(event, "%s drew an extra card (%s)",
+                           seat_name(g, g->current_player),
+                           card_name(g, card));
+            }
+        }
+    }
+    reset_invasion(g);
     g->phase = PHASE_DRAW;
     event = sink_new(sink, EVENT_END_TURN, g->current_player);
     if (event != NULL) {
@@ -2712,6 +3450,7 @@ static int remove_player(struct Game *g, int player, int kind,
     g->seats[player].alive = 0;
     clear_kick_vote_for(g, player);
     clear_closed_links_for(g, player);
+    clear_printed_effects_for(g, player);
     event = sink_new(sink, kind, player);
     if (event != NULL) {
         event_text(event, "%s", reason);
@@ -2798,6 +3537,359 @@ static int apply_recruit_leader(struct Game *g, int player,
                    seat_name(g, player), territory_name(g, t),
                    cost > 0 ? " (armies spent)" : "");
     }
+    return 0;
+}
+
+static int attack_pair_ok(const struct Game *g, int player, int from, int to,
+                          char *err, size_t err_size)
+{
+    if (g->phase != PHASE_ATTACK) {
+        set_error(err, err_size, "this card is played during your invasions");
+        return 0;
+    }
+    if (!terrain_valid(g, from) || !terrain_valid(g, to) ||
+        g->territories[from].owner != player ||
+        g->territories[to].owner == player ||
+        g->territories[from].armies < 2 || g->territories[to].armies < 1 ||
+        !game_attack_route(g, player, from, to)) {
+        set_error(err, err_size, "choose one of your possible invasions");
+        return 0;
+    }
+    return 1;
+}
+
+static void log_power(int player, int card, int from, int to,
+                      struct EventSink *sink, const char *fmt, ...)
+{
+    struct Event *event = sink_new(sink, EVENT_CARD_PLAYED, player);
+    va_list ap;
+
+    if (event == NULL) {
+        return;
+    }
+    event->card_a = card;
+    event->from = from;
+    event->to = to;
+    va_start(ap, fmt);
+    vsnprintf(event->text, sizeof(event->text), fmt, ap);
+    va_end(ap);
+}
+
+/* The printed power cards.  Returns 0 when played, -1 on a refused play and
+ * 1 when the card is not one of them. */
+static int play_printed_power(struct Game *g, int player,
+                              const struct Action *a, int slot, int card,
+                              const struct MapAdventureCard *mc,
+                              struct EventSink *sink,
+                              char *err, size_t err_size)
+{
+    int from = a->from;
+    int to = a->to;
+    int n;
+
+    if (strcmp(mc->effect, "AMBUSH") == 0) {
+        if (!attack_pair_ok(g, player, from, to, err, err_size)) {
+            return -1;
+        }
+        n = adventure_arg_int(mc, "n", 3);
+        g->territories[from].armies += n;
+        declare_invasion(g, from, to);
+        seat_remove_adventure(g, player, slot);
+        log_power(player, card, from, to, sink, "%s played %s: +%d "
+                  "battalions in %s", seat_name(g, player), mc->title, n,
+                  territory_name(g, from));
+        return 0;
+    }
+    if (strcmp(mc->effect, "SEABORNE_BONUS") == 0) {
+        if (!attack_pair_ok(g, player, from, to, err, err_size)) {
+            return -1;
+        }
+        if (!is_seaborne(g, from, to)) {
+            set_error(err, err_size, "choose an invasion across a sea-line");
+            return -1;
+        }
+        declare_invasion(g, from, to);
+        g->inv_attack_bonus += adventure_arg_int(mc, "n", 1);
+        seat_remove_adventure(g, player, slot);
+        log_power(player, card, from, to, sink, "%s played %s on the "
+                  "invasion of %s", seat_name(g, player), mc->title,
+                  territory_name(g, to));
+        return 0;
+    }
+    if (strcmp(mc->effect, "GRIMA") == 0) {
+        if (!attack_pair_ok(g, player, from, to, err, err_size)) {
+            return -1;
+        }
+        n = min_int(adventure_arg_int(mc, "n", 2),
+                    g->territories[to].armies - 1);
+        if (n < 1) {
+            set_error(err, err_size, "only 1 defending battalion is left");
+            return -1;
+        }
+        g->territories[to].armies -= n;
+        g->territories[from].armies += n;
+        declare_invasion(g, from, to);
+        seat_remove_adventure(g, player, slot);
+        log_power(player, card, from, to, sink, "%s played %s: %d "
+                  "battalions of %s turned to %s", seat_name(g, player),
+                  mc->title, n, territory_name(g, to),
+                  territory_name(g, from));
+        return 0;
+    }
+    if (strcmp(mc->effect, "NO_STRONGHOLD") == 0) {
+        if (!attack_pair_ok(g, player, from, to, err, err_size)) {
+            return -1;
+        }
+        if (!g->map->territories[to].stronghold) {
+            set_error(err, err_size, "choose an invasion of a Stronghold");
+            return -1;
+        }
+        declare_invasion(g, from, to);
+        g->inv_flags |= INV_NO_STRONGHOLD;
+        seat_remove_adventure(g, player, slot);
+        log_power(player, card, from, to, sink, "%s played %s: %s loses "
+                  "its Stronghold advantage", seat_name(g, player),
+                  mc->title, territory_name(g, to));
+        return 0;
+    }
+    if (strcmp(mc->effect, "MOUNTAIN_PASS") == 0) {
+        if (g->phase != PHASE_ATTACK) {
+            set_error(err, err_size,
+                      "this card is played during your invasions");
+            return -1;
+        }
+        if (!terrain_valid(g, from) || !terrain_valid(g, to) ||
+            g->territories[from].owner != player ||
+            g->territories[to].owner == player ||
+            g->territories[from].armies < 2 ||
+            g->territories[to].armies < 1 ||
+            !map_same_range(g->map, from, to) ||
+            g->frozen_by[from] != 0 || g->frozen_by[to] != 0) {
+            set_error(err, err_size, "choose an enemy territory next to the "
+                      "same mountain range");
+            return -1;
+        }
+        declare_invasion(g, from, to);
+        g->inv_flags |= INV_MOUNTAIN;
+        seat_remove_adventure(g, player, slot);
+        log_power(player, card, from, to, sink, "%s played %s: invading "
+                  "%s from %s under the mountains", seat_name(g, player),
+                  mc->title, territory_name(g, to), territory_name(g, from));
+        return 0;
+    }
+    if (strcmp(mc->effect, "LEADER_MOVE") == 0) {
+        if (g->phase != PHASE_REINFORCE) {
+            set_error(err, err_size, "play this at the start of your turn");
+            return -1;
+        }
+        if (!terrain_valid(g, from) || !terrain_valid(g, to) || from == to ||
+            g->territories[from].leader_of != player + 1 ||
+            g->territories[to].owner != player ||
+            g->territories[to].leader_of != 0) {
+            set_error(err, err_size, "move one of your Leaders to your own "
+                      "territory without a Leader");
+            return -1;
+        }
+        g->territories[from].leader_of = 0;
+        g->territories[to].leader_of = player + 1;
+        seat_remove_adventure(g, player, slot);
+        log_power(player, card, from, to, sink, "%s played %s: a Leader "
+                  "moved from %s to %s", seat_name(g, player), mc->title,
+                  territory_name(g, from), territory_name(g, to));
+        return 0;
+    }
+    if (strcmp(mc->effect, "BRIDGE_BLOCK") == 0) {
+        const struct MapBridge *bridge;
+        if (g->phase != PHASE_REINFORCE) {
+            set_error(err, err_size, "play this at the start of your turn");
+            return -1;
+        }
+        if (a->bridge < 0 || a->bridge >= g->map->bridgeCount ||
+            a->bridge >= MAP_MAX_BRIDGES) {
+            set_error(err, err_size, "choose a bridge");
+            return -1;
+        }
+        bridge = &g->map->bridges[a->bridge];
+        g->bridge_blocked_by[a->bridge] = player + 1;
+        seat_remove_adventure(g, player, slot);
+        log_power(player, card, bridge->a, bridge->b, sink, "%s played "
+                  "%s: the bridge between %s and %s is blocked until their "
+                  "next turn", seat_name(g, player), mc->title,
+                  territory_name(g, bridge->a), territory_name(g, bridge->b));
+        return 0;
+    }
+    if (strcmp(mc->effect, "EXTRA_REDEPLOY") == 0) {
+        if (g->phase != PHASE_FORTIFY) {
+            set_error(err, err_size, "play this after your last invasion, "
+                      "in the fortify phase");
+            return -1;
+        }
+        n = adventure_arg_int(mc, "n", 3);
+        g->extra_fortifies += n;
+        seat_remove_adventure(g, player, slot);
+        log_power(player, card, -1, -1, sink, "%s played %s: up to %d "
+                  "extra redeployments", seat_name(g, player), mc->title, n);
+        return 0;
+    }
+    return 1;
+}
+
+/* Site missions: "If, during your turn, one of your Leaders moves into (or is
+ * already in) a Site of Power listed on one of your Mission cards, you may
+ * declare that mission complete." */
+static int mission_area(const struct Game *g,
+                        const struct MapAdventureCard *mc,
+                        int *area, int *area_id)
+{
+    char reward[24];
+
+    adventure_arg_string(mc, "reward", reward, sizeof(reward));
+    *area_id = -1;
+    if (strcmp(reward, "region") == 0) {
+        *area = BONUS_REGION;
+        *area_id = adventure_arg_region(g, mc, "region");
+        return *area_id >= 0;
+    }
+    if (strcmp(reward, "territory") == 0) {
+        *area = BONUS_TERRITORY;
+        *area_id = adventure_arg_territory(g, mc, "territory");
+        return *area_id >= 0;
+    }
+    if (strcmp(reward, "port") == 0) {
+        *area = BONUS_PORT;
+        return 1;
+    }
+    if (strcmp(reward, "any") == 0) {
+        *area = BONUS_ANY;
+        return 1;
+    }
+    *area = BONUS_NONE;
+    return strcmp(reward, "card") == 0 || strcmp(reward, "oathbreakers") == 0;
+}
+
+static int mission_claimable(const struct Game *g, int player, int slot)
+{
+    const struct MapAdventureCard *mc;
+    int site, area, area_id, t;
+
+    if (slot < 0 || slot >= g->seats[player].adventure_hand_count) {
+        return 0;
+    }
+    mc = adventure_card_at(g, g->seats[player].adventure_hand[slot]);
+    if (mc == NULL || strcmp(mc->effect, "SITE_MISSION") != 0 ||
+        (g->phase != PHASE_REINFORCE && g->phase != PHASE_ATTACK &&
+         g->phase != PHASE_FORTIFY)) {
+        return 0;
+    }
+    site = adventure_arg_territory(g, mc, "site");
+    if (site < 0 || g->territories[site].owner != player ||
+        g->territories[site].leader_of != player + 1 ||
+        !mission_area(g, mc, &area, &area_id)) {
+        return 0;
+    }
+    if (area == BONUS_NONE) {
+        return 1;
+    }
+    for (t = 0; t < g->territory_count; t++) {
+        if (area_target_ok(g, player, t, area, area_id)) {
+            return 1;   /* somewhere to place the battalions */
+        }
+    }
+    return 0;
+}
+
+static int apply_claim_mission(struct Game *g, int player,
+                               const struct Action *a,
+                               struct EventSink *sink,
+                               char *err, size_t err_size)
+{
+    int slot = a->card_a;
+    int card, area, area_id, amount;
+    const struct MapAdventureCard *mc;
+    char reward[24];
+    struct Event *event;
+
+    if (!mission_claimable(g, player, slot)) {
+        set_error(err, err_size, "bring one of your Leaders to that "
+                  "mission's Site of Power first");
+        return -1;
+    }
+    card = g->seats[player].adventure_hand[slot];
+    mc = adventure_card_at(g, card);
+    mission_area(g, mc, &area, &area_id);
+    adventure_arg_string(mc, "reward", reward, sizeof(reward));
+    amount = adventure_arg_int(mc, player_side(g, player) == MAP_SIDE_EVIL
+                               ? "evil" : "good", 0);
+    seat_remove_adventure(g, player, slot);
+    g->seats[player].missions_done++;
+    event = sink_new(sink, EVENT_MISSION_COMPLETE, player);
+    if (event != NULL) {
+        event->card_a = card;
+        event->to = adventure_arg_territory(g, mc, "site");
+        event->count = amount;
+    }
+    if (strcmp(reward, "card") == 0) {
+        g->seats[player].extra_card_draws++;
+        if (event != NULL) {
+            event_text(event, "%s completed %s: an extra Territory card at "
+                       "the end of the turn", seat_name(g, player),
+                       mc->title);
+        }
+    } else if (strcmp(reward, "oathbreakers") == 0) {
+        g->seats[player].oathbreakers += amount;
+        if (event != NULL) {
+            event_text(event, "%s completed %s: %d Oathbreakers wait to "
+                       "join an invasion", seat_name(g, player), mc->title,
+                       amount);
+        }
+    } else {
+        g->bonus_pending = amount;
+        g->bonus_area = amount > 0 ? area : BONUS_NONE;
+        g->bonus_area_id = area_id;
+        if (event != NULL) {
+            event_text(event, "%s completed %s: %d battalions to place",
+                       seat_name(g, player), mc->title, amount);
+        }
+    }
+    return 0;
+}
+
+static int apply_oathbreakers(struct Game *g, int player,
+                              const struct Action *a,
+                              struct EventSink *sink,
+                              char *err, size_t err_size)
+{
+    int t = a->territory;
+    int j, can_invade = 0;
+    struct Event *event;
+
+    if (g->phase != PHASE_ATTACK || g->seats[player].oathbreakers <= 0) {
+        set_error(err, err_size, "no Oathbreakers to send now");
+        return -1;
+    }
+    if (!terrain_valid(g, t) || g->territories[t].owner != player) {
+        set_error(err, err_size, "choose a territory you invade from");
+        return -1;
+    }
+    for (j = 0; j < g->territory_count && !can_invade; j++) {
+        can_invade = g->territories[j].owner != player &&
+                     g->territories[j].armies > 0 &&
+                     game_attack_route(g, player, t, j);
+    }
+    if (!can_invade) {
+        set_error(err, err_size, "choose a territory you invade from");
+        return -1;
+    }
+    g->territories[t].armies += g->seats[player].oathbreakers;
+    event = sink_new(sink, EVENT_CARD_PLAYED, player);
+    if (event != NULL) {
+        event->to = t;
+        event->count = g->seats[player].oathbreakers;
+        event_text(event, "%s: %d Oathbreakers joined the invasion from %s",
+                   seat_name(g, player), g->seats[player].oathbreakers,
+                   territory_name(g, t));
+    }
+    g->seats[player].oathbreakers = 0;
     return 0;
 }
 
@@ -2897,9 +3989,19 @@ static int apply_play_card(struct Game *g, int player,
         }
         return 0;
     }
+    {
+        int rc = play_printed_power(g, player, a, slot, played_card, mc,
+                                    sink, err, err_size);
+        if (rc != 1) {
+            return rc;
+        }
+    }
     if (strcmp(mc->effect, "DEFENSE_BONUS") == 0 ||
         strcmp(mc->effect, "REROLL") == 0 ||
-        strcmp(mc->effect, "CANCEL_EVENT") == 0) {
+        strcmp(mc->effect, "CANCEL_EVENT") == 0 ||
+        strcmp(mc->effect, "INVADED_REINFORCE") == 0 ||
+        strcmp(mc->effect, "WITHDRAW") == 0 ||
+        strcmp(mc->effect, "STORM_REPEL") == 0) {
         set_error(err, err_size,
                   "that reactive card uses a standing order");
         return -1;
@@ -2943,6 +4045,7 @@ int game_apply(struct Game *g, int player, const struct Action *action,
                char *err, size_t err_size)
 {
     struct EventSink sink;
+    struct Game *snapshot;
     int rc = -1;
     int i;
 
@@ -2964,7 +4067,7 @@ int game_apply(struct Game *g, int player, const struct Action *action,
         set_error(err, err_size, "invalid player");
         return -1;
     }
-    if (action->type < ACT_CLAIM || action->type > ACT_DISCARD_ADVENTURE) {
+    if (action->type < ACT_CLAIM || action->type > ACT_OATHBREAKERS) {
         set_error(err, err_size, "unknown action");
         return -1;
     }
@@ -2993,6 +4096,24 @@ int game_apply(struct Game *g, int player, const struct Action *action,
                   "discard down to four adventure cards first");
         return -1;
     }
+    if (g->pending_free_leader && action->type != ACT_PLACE_LEADER &&
+        action->type != ACT_RESIGN && action->type != ACT_KICK) {
+        set_error(err, err_size, "place your free Leader first");
+        return -1;
+    }
+    if (g->bonus_pending > 0 && action->type != ACT_PLACE &&
+        action->type != ACT_RESIGN && action->type != ACT_KICK) {
+        set_error(err, err_size, "place your mission battalions first");
+        return -1;
+    }
+    /* A rejected action must leave the game untouched; the printed cards
+     * chain several changes, so restore a snapshot on failure. */
+    snapshot = (struct Game *)malloc(sizeof(*snapshot));
+    if (snapshot == NULL) {
+        set_error(err, err_size, "out of memory");
+        return -1;
+    }
+    memcpy(snapshot, g, sizeof(*snapshot));
     memset(&sink, 0, sizeof(sink));
     switch (action->type) {
     case ACT_CLAIM:
@@ -3040,12 +4161,25 @@ int game_apply(struct Game *g, int player, const struct Action *action,
     case ACT_DISCARD_ADVENTURE:
         rc = apply_discard_adventure(g, player, action, &sink, err, err_size);
         break;
+    case ACT_CLAIM_MISSION:
+        rc = apply_claim_mission(g, player, action, &sink, err, err_size);
+        break;
+    case ACT_OATHBREAKERS:
+        rc = apply_oathbreakers(g, player, action, &sink, err, err_size);
+        break;
     default:
         set_error(err, err_size, "unknown action");
-        return -1;
+        rc = -1;
+        break;
     }
     if (rc != 0) {
+        memcpy(g, snapshot, sizeof(*g));
+        free(snapshot);
         return -1;
+    }
+    free(snapshot);
+    if (g->status == GAME_RUNNING) {
+        check_uprisings(g, &sink);
     }
     g->version++;
     g->updated = time(NULL);
@@ -3104,6 +4238,22 @@ void game_legal_actions(const struct Game *g, struct LegalActions *out)
     if (g->must_discard_adventure) {
         return;
     }
+    if (g->pending_free_leader) {
+        out->free_leader_pending = 1;
+        for (i = 0; i < g->territory_count; i++) {
+            out->leader_placeable[i] = g->territories[i].owner == current &&
+                g->territories[i].armies >= 1 &&
+                g->territories[i].leader_of == 0;
+        }
+        return;
+    }
+    if (g->bonus_pending > 0) {
+        out->bonus_pending = g->bonus_pending;
+        for (i = 0; i < g->territory_count; i++) {
+            out->bonus_placeable[i] = bonus_target_ok(g, current, i);
+        }
+        return;
+    }
     if (g->must_trade) {
         out->can_trade = hand_has_set(g, current);
         return;
@@ -3129,7 +4279,22 @@ void game_legal_actions(const struct Game *g, struct LegalActions *out)
                    has_recruit_spot(g, current)) {
             out->playable_adventure[i] = 1;
             out->has_recruit_card = 1;
+        } else if ((strcmp(mc->effect, "AMBUSH") == 0 ||
+                    strcmp(mc->effect, "GRIMA") == 0 ||
+                    strcmp(mc->effect, "NO_STRONGHOLD") == 0 ||
+                    strcmp(mc->effect, "SEABORNE_BONUS") == 0 ||
+                    strcmp(mc->effect, "MOUNTAIN_PASS") == 0) &&
+                   g->phase == PHASE_ATTACK) {
+            out->playable_adventure[i] = 1;   /* the client picks the pair */
+        } else if ((strcmp(mc->effect, "LEADER_MOVE") == 0 &&
+                    g->seats[current].leaders_in_play > 0) ||
+                   (strcmp(mc->effect, "BRIDGE_BLOCK") == 0 &&
+                    g->map->bridgeCount > 0)) {
+            out->playable_adventure[i] = g->phase == PHASE_REINFORCE;
+        } else if (strcmp(mc->effect, "EXTRA_REDEPLOY") == 0) {
+            out->playable_adventure[i] = g->phase == PHASE_FORTIFY;
         }
+        out->claimable_mission[i] = mission_claimable(g, current, i);
     }
     switch (g->phase) {
     case PHASE_SETUP_CLAIM:
@@ -3186,6 +4351,7 @@ void game_legal_actions(const struct Game *g, struct LegalActions *out)
         break;
     case PHASE_ATTACK:
         out->can_done_attack = 1;
+        out->can_oathbreakers = g->seats[current].oathbreakers > 0;
         for (i = 0; i < g->territory_count; i++) {
             if (g->territories[i].owner != current ||
                 g->territories[i].armies < 2) {
@@ -3197,7 +4363,7 @@ void game_legal_actions(const struct Game *g, struct LegalActions *out)
                 if (j == i || g->territories[j].owner == current) {
                     continue;
                 }
-                if (game_territories_connected(g, i, j) &&
+                if (game_attack_route(g, current, i, j) &&
                     g->territories[j].armies > 0) {
                     out->attack[i][j] = 1;
                 }
@@ -3220,8 +4386,14 @@ void game_legal_actions(const struct Game *g, struct LegalActions *out)
                     if (i == j || g->territories[j].owner != current) {
                         continue;
                     }
-                    if (game_can_fortify(g, current, i, j)) {
+                    /* 1 = possible; 2 = only with the Leader going along
+                     * (a bridge on the way is blocked). */
+                    if (fortify_path(g, current, i, j, 0)) {
                         out->fortify[i][j] = 1;
+                    } else if (g->territories[i].leader_of == current + 1 &&
+                               g->territories[j].leader_of == 0 &&
+                               fortify_path(g, current, i, j, 1)) {
+                        out->fortify[i][j] = 2;
                     }
                 }
             }
@@ -3482,6 +4654,13 @@ int game_view(const struct Game *g, int viewer_seat, char *out,
         view_fmt(&w, "%d", g->seats[i].missions_done);
         view_key(&w, &ofirst, "lastSeen");
         view_fmt(&w, "%d", g->seats[i].last_seen_version);
+        view_key(&w, &ofirst, "side");
+        view_string(&w, player_side(g, i) == MAP_SIDE_EVIL ? "evil"
+                    : player_side(g, i) == MAP_SIDE_GOOD ? "good" : "");
+        view_key(&w, &ofirst, "oathbreakers");
+        view_fmt(&w, "%d", g->seats[i].oathbreakers);
+        view_key(&w, &ofirst, "uprising");
+        view_bool(&w, g->seats[i].uprising_card >= 0);
         view_key(&w, &ofirst, "setupPool");
         view_fmt(&w, "%d", g->setup_pool[i]);
         view_key(&w, &ofirst, "stats");
@@ -3619,6 +4798,56 @@ int game_view(const struct Game *g, int viewer_seat, char *out,
     } else {
         view_raw(&w, "null");
     }
+
+    /* printed adventure cards: active effects and pending choices */
+    view_key(&w, &first, "printed");
+    view_raw(&w, "{");
+    ofirst = 1;
+    view_key(&w, &ofirst, "toll");
+    view_fmt(&w, "%d", g->toll_by - 1);
+    view_key(&w, &ofirst, "frozen");
+    view_raw(&w, "[");
+    afirst = 1;
+    for (i = 0; i < g->territory_count; i++) {
+        if (g->frozen_by[i] != 0) {
+            view_sep(&w, &afirst);
+            view_fmt(&w, "[%d,%d]", i, g->frozen_by[i] - 1);
+        }
+    }
+    view_raw(&w, "]");
+    view_key(&w, &ofirst, "blockedBridges");
+    view_raw(&w, "[");
+    afirst = 1;
+    for (i = 0; i < g->map->bridgeCount && i < MAP_MAX_BRIDGES; i++) {
+        if (g->bridge_blocked_by[i] != 0) {
+            view_sep(&w, &afirst);
+            view_fmt(&w, "[%d,%d]", i, g->bridge_blocked_by[i] - 1);
+        }
+    }
+    view_raw(&w, "]");
+    view_key(&w, &ofirst, "invasion");
+    if (g->inv_from >= 0) {
+        view_fmt(&w, "{\"from\":%d,\"to\":%d,\"noStronghold\":%s,"
+                 "\"mountain\":%s,\"bonus\":%d}", g->inv_from, g->inv_to,
+                 (g->inv_flags & INV_NO_STRONGHOLD) ? "true" : "false",
+                 (g->inv_flags & INV_MOUNTAIN) ? "true" : "false",
+                 g->inv_attack_bonus);
+    } else {
+        view_raw(&w, "null");
+    }
+    view_key(&w, &ofirst, "freeLeader");
+    view_bool(&w, g->pending_free_leader);
+    view_key(&w, &ofirst, "bonus");
+    view_fmt(&w, "%d", g->bonus_pending);
+    view_key(&w, &ofirst, "bonusSplit");   /* may the battalions be split? */
+    view_bool(&w, g->bonus_area == BONUS_REGION);
+    view_key(&w, &ofirst, "uprising");
+    if (viewer_seat >= 0 && g->seats[viewer_seat].uprising_card >= 0) {
+        view_fmt(&w, "%d", card_territory(g, g->seats[viewer_seat].uprising_card));
+    } else {
+        view_raw(&w, "-1");   /* secret from everyone else */
+    }
+    view_raw(&w, "}");
 
     view_key(&w, &first, "closedLinks");
     view_raw(&w, "[");
@@ -3795,6 +5024,32 @@ int game_view(const struct Game *g, int viewer_seat, char *out,
         }
         view_raw(&w, "]");
 
+        view_key(&w, &ofirst, "freeLeaderPending");
+        view_bool(&w, legal.free_leader_pending);
+        view_key(&w, &ofirst, "canOathbreakers");
+        view_bool(&w, legal.can_oathbreakers);
+        view_key(&w, &ofirst, "bonusPlaceable");
+        view_raw(&w, "[");
+        afirst = 1;
+        for (i = 0; i < g->territory_count; i++) {
+            if (legal.bonus_placeable[i]) {
+                view_sep(&w, &afirst);
+                view_fmt(&w, "%d", i);
+            }
+        }
+        view_raw(&w, "]");
+        view_key(&w, &ofirst, "claimableMissions");
+        view_raw(&w, "[");
+        afirst = 1;
+        for (i = 0; viewer_seat >= 0 &&
+                    i < g->seats[viewer_seat].adventure_hand_count; i++) {
+            if (legal.claimable_mission[i]) {
+                view_sep(&w, &afirst);
+                view_fmt(&w, "%d", i);
+            }
+        }
+        view_raw(&w, "]");
+
         view_key(&w, &ofirst, "playableAdventure");
         view_raw(&w, "[");
         afirst = 1;
@@ -3843,6 +5098,10 @@ int game_view(const struct Game *g, int viewer_seat, char *out,
                     view_fmt(&w, "%d", i);
                     view_key(&w, &bfirst, "to");
                     view_fmt(&w, "%d", j);
+                    if (legal.fortify[i][j] == 2) {
+                        view_key(&w, &bfirst, "needsLeader");
+                        view_bool(&w, 1);
+                    }
                     view_raw(&w, "}");
                 }
             }

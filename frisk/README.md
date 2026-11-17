@@ -32,6 +32,11 @@ shared account database are relative paths:
 Open `http://<host>:8090/`.  The client is dependency-free; no CDN or build step
 is involved.
 
+AmmarServer keeps the static files in memory and sends them with
+`Cache-Control: max-age=3600`.  After changing anything under `res/`, restart the
+server, and bump the `?v=` tag on the CSS/JS links in `res/index.html` so browsers
+fetch the new files as a matching set instead of mixing cached old ones in.
+
 ## Accounts, invites and administration
 
 The first account registered on a fresh `db/users.db` becomes the administrator
@@ -90,8 +95,11 @@ src/AmmarServerGames/run_tests.sh
 ```
 
 This runs the engine/unit/fuzz suite, the HTTP smoke test, the authorization
-audit and `tests/history_test.py` (finished-game history, unloading and faction
-switching).  Additional longer checks:
+audit, `tests/history_test.py` (finished-game history, unloading and faction
+switching) and `tests/browser_input.py`, which drives headless Chrome with real
+mouse/touch/keyboard events (map clicks, drag, pinch, double-click zoom and
+placement).  The browser test skips itself when no Chrome/Chromium binary or
+Python `websockets` module is installed; `FRISK_CHROME` selects the browser.  Additional longer checks:
 
 ```sh
 cd src/AmmarServerGames/frisk
@@ -145,7 +153,14 @@ lowercase extension.
 
 In a game, desktop users can press `Enter` to activate the marked primary
 action (done reinforcing/attacking, end turn, move, start), `Esc` to clear the
-selection or skip a replay, and `1`/`2`/`3` to attack with that many dice when a
-legal attack pair is selected.  Focus outlines are visible, faction fills use
+selection, skip a replay or close an open panel sheet, and `1`/`2`/`3` to attack
+with that many dice when a legal attack pair is selected.  Double-click (or
+double-tap) a territory to zoom to it.  Clickable territories have a pulsing
+white ring on their army badge; the chosen source is cyan and the target orange.
+Hovering (or tapping) a territory shows its name, region bonus, owner, armies,
+leader, stronghold and site; the Players tab lists every region with its bonus
+and holder.  With *Sound effects* on, a short chime plays when a game turns to
+you (desktop notifications need HTTPS).  On portrait phones the turn controls dock
+at the bottom and Players/Cards/Log/Chat open as sheets over the map.  Focus outlines are visible, faction fills use
 distinct stripe/dot/hatch patterns as well as colours, and the CSS honours
 `prefers-reduced-motion`.

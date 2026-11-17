@@ -7,7 +7,8 @@ Status: **M1 (Phase A), M2 (Phase D), M3 (Phase F engine half), M4 (Phases B/C),
 (playable lobby + board + browser client), M6 (async comfort), M7 (leaders, strongholds, sites,
 adventure cards), M8 (chat, clips, taunts, housekeeping) and M9 (hardening, load test, README)
 implemented.** Post-M9 polish (2026-11-17): 7.6 finished-game history/unloading, 8.4 faction pick,
-8.5 last-action highlight + double-tap zoom, 8.7 dice animation and 8.12 end-of-game banner.
+8.5 last-action highlight + double-tap zoom, 8.7 dice animation, 8.11 responsive layout, 8.12
+end-of-game banner and the 8.13 offline audit.
 The default data pack is the owner's RISK: The Lord of the Rings board with PLAN.md's rules.
 Tick the boxes as steps land; deviations from a step are recorded inline.
 
@@ -469,6 +470,27 @@ No frameworks, no build step. ES modules, one CSS file. All user-supplied string
   fit, owner fills, badges, leader/stronghold/site markers and the selectable/source/target classes. The
   per-faction pattern overlays landed in M9; double-tap/double-click zoom to a territory and a dashed
   `last-action` highlight on the latest spatial log event landed on 2026-11-17.
+  **Fixed (2026-11-17, owner report "placing armies did not work"):** the map called `setPointerCapture`
+  on every `pointerdown`, so the `click` ending a plain mouse press was retargeted to the container and no
+  territory ever received a mouse click (claim/place/attack/fortify were all dead with a mouse; touch
+  happened to work in Chrome). Capture now starts only when a press becomes a drag (> 6 px) or a pinch.
+  Earlier verification used synthetic `element.click()` calls, which bypass capture; the new
+  `tests/browser_input.py` drives Chrome with trusted mouse/touch/keyboard events and fails on the old code.
+  The LOTR anchor hexes are only 12–17 px on a fitted board, so each territory also gets an invisible hit
+  area (its nearest-label Voronoi cell, capped at 0.7 × the mean cell radius), a hover outline and a native
+  name tooltip; clickable badges get a pulsing white ring (cyan = chosen source, orange = target; colours
+  no faction uses, non-scaling stroke). Before a source is chosen only valid sources are highlighted, then
+  only that source's targets. The dice overlay no longer swallows the next map click
+  (`pointer-events: none`; any map press dismisses it).
+  **Pieces (2026-11-17, owner request):** the pack's 2.6 piece art is now rendered. Each army is drawn
+  beside its number as a stack of `unit5`/`unit3`/`unit1` tokens (greedy, at most five, then `+`) tinted
+  with the owner's faction colour through `currentColor`; leaders use the `leader` sprite and
+  strongholds/sites `pieces/stronghold.svg` / `pieces/site.svg` (text glyphs if a pack lacks them). The
+  sprites are copied once into the board's `<defs>` as `<symbol>`s (shape elements only) and drawn with
+  `<use>`; badges are layered rings → pieces → numbers so dense clusters never hide a number. Hovering
+  (mouse) or tapping (touch) a territory shows an info chip: name, region and bonus, owner and armies,
+  leader, stronghold and site. The Players tab lists every region with its bonus and its holder (or how
+  much of it you hold).
 - [x] **8.6 Turn UI `game.js`**: a small client state machine mirroring the server phase; legal targets come
   from the server (`state.legal`, produced by `game_legal_actions()`), so the client never re-implements rules.
   - Reinforce: breakdown tooltip, tap territory → stepper (+1/+5/all), *Trade cards* shortcut, *Done*.
@@ -476,10 +498,14 @@ No frameworks, no build step. ES modules, one CSS file. All user-supplied string
     conquest move slider (+ "bring leader" toggle).
   - Fortify: source → reachable destinations highlighted → slider → *End turn*.
   - Confirmation only for irreversible, non-obvious actions (resign, end turn with unplaced armies).
-  **Implemented** for setup claim/place/leaders, reinforce (1/5/all buttons plus trade shortcut and Done),
-  attack (dice chooser and blitz), conquest move, fortify, end turn and resign. Buttons replace the planned
-  steppers/sliders; moving a leader with armies is exposed as a *Bring the leader* toggle on conquest moves and
-  fortifies; attack dice are animated (see 8.7). Resign is confirmed and lives in the game header.
+  **Implemented** for setup claim/place/leaders, reinforce (trade shortcut and Done), attack (dice chooser
+  and blitz), conquest move, fortify, end turn and resign. Placement, conquest moves and fortifies use a
+  slider with a *Place N* / *Move N* confirm button (Enter) plus quick buttons (1 / 5 for placement, *Min*
+  for conquest, 1 for fortify); *Blitz* has a *stop at 1/2/3/5/10* choice. Moving a leader with armies is
+  a *Bring the leader* toggle on conquest moves and fortifies; attack dice are animated (see 8.7). Resign
+  is confirmed and lives in the game header. A scripted run that plays every phase through the real UI
+  (trusted mouse and touch input, draft claim through card trades, blitz and fortify) completes with no
+  failed step.
 - [x] **8.7 Dice `dice.js`**: CSS 3D or sprite roll ~600 ms with `dice_1.wav`, then show server results,
   modifiers as `+1` chips, paired comparison lines, casualty counters. Skippable; user setting to disable
   animation/sound (stored in `localStorage`).
@@ -497,6 +523,8 @@ No frameworks, no build step. ES modules, one CSS file. All user-supplied string
   tab-title turn notification and opt-in desktop `Notification`s (permission button in the account panel;
   browser/secure-context restrictions are surfaced). M8 adds chat polling at 2 s in a game and 3 s in the
   lobby when visible (20 s hidden); the separate `/api/chat` tail leaves the game-state response unchanged.
+  Because notifications need a secure context, a short Web Audio chime (no sound file; *Sound effects*
+  setting) now plays when a game turns to you, both in the game view and in the lobby.
 - [x] **8.9 Cards `cards.js`**: the territory-card hand keeps the auto-suggested set shortcut; the adventure
   drawer shows kind/title/text, a Play button only for `state.legal.playableAdventure`, standing-order
   selectors for reactive powers, Discard buttons under the hand limit, deck/discard counts, and live mission
@@ -507,20 +535,35 @@ No frameworks, no build step. ES modules, one CSS file. All user-supplied string
   1×/2×/4× speed toggle; then POST `seen` so the server stores `lastSeenVersion`. The same replay events and
   the event ring feed the side-panel log. Leaving the game or hiding the tab advances the watermark so only
   genuinely missed events replay.
-- [ ] **8.11 Layout / responsive CSS**:
+- [x] **8.11 Layout / responsive CSS**:
   - ≥ 1000 px: map left (flex 1), 340 px right panel with tabs *Players · Log · Chat · Cards*, phase bar on top.
   - < 1000 px: map full-viewport; top strip (phase, current player, armies to place); bottom action bar with
     large (≥ 44 px) buttons; *Players / Log / Chat / Cards* as slide-up sheets with unread badges.
   - `meta viewport`, `touch-action: none` on the map only, safe-area insets, no hover-only affordances,
     landscape + portrait both usable. Dark wood theme reusing `textures/environment/wood.jpg`.
+  **Implemented (2026-11-17):** in a game the page is exactly one viewport tall (no page scroll). Wide
+  screens: map left, 340 px column with the phase bar + actions on top and *Players · Cards · Log · Chat*
+  tabs (Cards also holds the adventure drawer; the last tab is remembered). Portrait below 1000 px: map
+  fills the screen, actions + tabs dock at the bottom with ≥ 44 px targets and safe-area padding, and a
+  tab opens as a slide-up sheet over the map (tap the tab again, tap the map or press Esc to close).
+  Landscape below 1000 px keeps a 290 px side column; at ≤ 500 px height the top bar is hidden in a game.
+  Badges show unread log events and chat messages (not your own or system lines), the card count, and
+  `!` when a trade/discard is forced. The phone top bar no longer overflows (it made the page 497 px wide
+  on a 390 px screen). Lobby faction dots now use each pack's colours instead of grey. Verified by
+  screenshots at 1440×900, 1100×720, 820×1180, 390×844 and 844×390 plus a phone interaction check.
 - [x] **8.12 End of game**: winner banner (`win.wav` / `lost.wav`), final stats table, *Back to lobby*.
   **Implemented (2026-11-17):** a Victory/Defeat/Game-over banner over the map with a per-player table
   (lands, taken, killed, lost, missions; winner first), *Back to lobby* and *View the board*. The sound
   plays once when the finish is seen live or on first return after an unseen finish, and waits for the
   replay to end.
-- [ ] **8.13 Offline-asset audit**: `grep -rE "https?://" res/` returns nothing but comments.
-- [ ] **8.14 Replace old prototypes**: `frisk/board.html` and `frisk/res/board.html` are superseded by
+- [x] **8.13 Offline-asset audit**: `grep -rE "https?://" res/` returns nothing but comments.
+  **Passed (2026-11-17):** the only hits in the client and the LOTR pack are SVG/XLink namespace URIs
+  (`http://www.w3.org/...`), which are identifiers, not fetches; the old prototype `res/board.html`
+  has none either.
+- [x] **8.14 Replace old prototypes**: `frisk/board.html` and `frisk/res/board.html` are superseded by
   `res/index.html`; delete them (and `res/textures/map_full.map`) once the new client renders the map.
+  **Done (2026-11-17)** on the owner's request. `res/textures/map_full.jpg` (the 2861×4695 board scan) was
+  only referenced by the prototypes but is not listed here and was kept.
 
 **Exit check G:** a complete 3-player game played by hand: desktop Firefox + desktop Chromium + a real phone on
 the LAN, including one browser being closed for several turns and replaying on return.
@@ -674,6 +717,46 @@ which fixed a partial `RUNNING`/`LOBBY` state found while building the stress pa
 
 ---
 
+## 10b. Phase J — Printed adventure cards (M10, owner decision 2026-11-17)
+
+The owner asked that the cards "trigger correctly" (e.g. *Appoint a Second Leader*, *Borne to Another
+Place*, *The Way Is Under the Mountains*) and chose **printed cards, no Fellowship**: the LOTR pack's
+adventure deck follows the scanned cards in `res/textures/cards/` instead of §0's "generic adventure
+effects". The game is still last-player-standing (card points are shown, not scored) and the ten
+Fellowship cards stay out (there is no Ring track). The generic effects stay in the engine for other packs.
+
+- [ ] **10b.1 Card flow from the rulebook** (card section only): deal 4 non-event adventure cards to every
+  player at the start; at the end of a turn in which one of your Leaders conquered a territory with a Site
+  of Power, draw 1 card; Event cards ("Play immediately") resolve at once and the drawing continues until
+  a Mission or Power card is drawn; more than 4 cards in hand → discard one of your choice. A Leader
+  "conquers" a site when it moves in with the conquest. (Replaces §6's leader-on-site end-of-turn draw.)
+- [ ] **10b.2 Board data**: faction sides (Elves, Rohan = good; Mordor, Isengard = evil), ports (ends of
+  sea-lines), bridges (river crossings drawn on the board) and mountain ranges (territories next to each
+  range), read off the board scan; plus a re-check of every badge anchor against the printed territory.
+- [ ] **10b.3 Deck (50 cards)**: 13 events (4× Appoint a Second Leader, Aragorn Arrives, The Black Gates
+  Open, The Entmoot, They've Brought a Cavetroll, Corsairs of Umbar, Local Uprising, Raiders, The
+  Mustering of Middle-earth, Winter Storms), 15 powers (Ambush!, Black Sails, Borne to Another Place,
+  Courage Alone Will Not Save You!, 2× Gríma Wormtongue, Move by Night, Siege Machines, Strategic
+  Withdrawal, The Enemy Is at Hand!, 2× The Way Is Under the Mountains, Violent Storms, 2× You Shall Not
+  Pass!) and the 22 site Missions (good/evil rewards: battalions in a region, territory, any territory or
+  port; an extra territory card; Erech's 6 Oathbreakers).
+- [ ] **10b.4 Engine**: invasion tracking (an invasion = attacks from one territory into one territory
+  until it falls or the attacker switches), the new effects, mission claims with reward placement,
+  pending choices that pause the end of the turn (a free leader from an event), standing orders for the
+  defender's cards (Courage Alone, Strategic Withdrawal, Violent Storms — defenders are offline in async
+  play), a state snapshot so a failed action never leaves partial changes, and save-file migration
+  (games saved with the old 36-card deck are rebuilt with the new deck while no adventure card is out).
+- [ ] **10b.5 Server and client**: action parameters, legal plays per card, a Play flow per card (pick a
+  territory, an attack pair, a leader and destination, or a bridge), mission claim and reward placement,
+  standing-order selectors, and markers for active effects (frozen territories, blocked bridges, Corsairs).
+- [ ] **10b.6 Tests**: engine tests per printed effect, fuzzing with the new effects (card conservation
+  including Local Uprising cards), and a trusted-input browser run that plays every card type.
+
+**Exit check J:** every printed card's effect is covered by an engine test and the browser run plays each
+power, claims missions and resolves events through the real UI.
+
+---
+
 ## 11. Build order and milestones
 
 | # | Milestone | Phases | Demonstrable result |
@@ -687,6 +770,7 @@ which fixed a partial `RUNNING`/`LOBBY` state found while building the stress pa
 | M7 | Full rules | E, 8.9 | leaders, strongholds, sites, adventure cards in play |
 | M8 | Talk | H | chat + voice clips on phone and desktop |
 | M9 | Ship | I | audits, load test, README |
+| M10 | Printed cards | J | the LOTR adventure cards follow their printed text |
 
 Each milestone ends with its phase exit check; do not start the next one with a red check.
 

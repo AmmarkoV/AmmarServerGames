@@ -336,6 +336,23 @@ int game_to_json(const struct Game *g, char *out, size_t out_size)
     sw_fmt(&w, "%d", g->territories_conquered_this_turn);
     sw_raw(&w, "}");
 
+    /* printed adventure cards (PLAN.md 10b) */
+    sw_key(&w, &first, "printed");
+    sw_raw(&w, "{");
+    ofirst = 1;
+    sw_key(&w, &ofirst, "state");
+    sw_fmt(&w, "[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d]",
+           g->leader_conquered_site, g->draw_pending, g->pending_free_leader,
+           g->bonus_pending, g->bonus_area, g->bonus_area_id, g->inv_from,
+           g->inv_to, g->inv_flags, g->inv_attack_bonus, g->toll_by,
+           g->toll_loss);
+    sw_key(&w, &ofirst, "frozen");
+    sw_int_array(&w, g->frozen_by, g->territory_count);
+    sw_key(&w, &ofirst, "bridges");
+    sw_int_array(&w, g->bridge_blocked_by,
+                 g->map != NULL ? g->map->bridgeCount : 0);
+    sw_raw(&w, "}");
+
     sw_key(&w, &first, "closedLinks");
     sw_raw(&w, "[");
     for (i = 0; i < g->map->linkCount && i < MAP_MAX_LINKS; i++) {
@@ -487,6 +504,10 @@ int game_to_json(const struct Game *g, char *out, size_t out_size)
         sw_raw(&w, "]");
         sw_key(&w, &ofirst, "attackBonus");
         sw_fmt(&w, "%d", seat->attack_bonus);
+        sw_key(&w, &ofirst, "printed");
+        sw_fmt(&w, "[%d,%d,%d,%d]", seat->uprising_card,
+               seat->uprising_bonus, seat->oathbreakers,
+               seat->extra_card_draws);
         sw_key(&w, &ofirst, "siteClaimed");
         sw_raw(&w, "[");
         {
@@ -781,7 +802,32 @@ static int read_seat(const JsonValue *object, struct Seat *seat,
         const JsonValue *auto_n_values = json_get(object, "adventureAutoN");
         const JsonValue *sites = json_get(object, "siteClaimed");
         const JsonValue *bonus = json_get(object, "attackBonus");
+        const JsonValue *printed = json_get(object, "printed");
         size_t k;
+        seat->uprising_card = -1;
+        seat->uprising_bonus = 0;
+        seat->oathbreakers = 0;
+        seat->extra_card_draws = 0;
+        if (printed != NULL) {
+            long long v[4];
+            if (printed->type != JSON_ARRAY || json_count(printed) != 4) {
+                set_error(err, err_size, "%s: bad printed-card state",
+                          context);
+                return -1;
+            }
+            for (k = 0; k < 4; k++) {
+                if (json_get_int(json_at(printed, k), &v[k]) != 0 ||
+                    v[k] < (k == 0 ? -1 : 0) || v[k] > 100000) {
+                    set_error(err, err_size, "%s: bad printed-card state",
+                              context);
+                    return -1;
+                }
+            }
+            seat->uprising_card = (int)v[0];
+            seat->uprising_bonus = (int)v[1];
+            seat->oathbreakers = (int)v[2];
+            seat->extra_card_draws = (int)v[3];
+        }
         memset(seat->adventure_auto, 0, sizeof(seat->adventure_auto));
         memset(seat->adventure_auto_n, 0,
                sizeof(seat->adventure_auto_n));
@@ -1215,6 +1261,18 @@ static int validate_loaded(const struct Game *g, const struct Map *map,
             total++;
         }
     }
+    for (i = 0; i < g->player_count; i++) {
+        int c = g->seats[i].uprising_card;
+        if (c < 0) {
+            continue;
+        }
+        if (c >= map->territoryCardCount || seen[c]) {
+            set_error(err, err_size, "invalid Local Uprising card");
+            return -1;
+        }
+        seen[c] = 1;
+        total++;
+    }
     if (total != map->territoryCardCount) {
         set_error(err, err_size, "territory cards are not conserved");
         return -1;
@@ -1427,6 +1485,77 @@ int game_from_json(const char *json, struct Game *g, const struct Map *map,
                 goto fail;
             }
             tmp->territories_conquered_this_turn = (int)n;
+        }
+    }
+    {
+        const JsonValue *printed = json_get(root, "printed");
+        tmp->inv_from = -1;
+        tmp->inv_to = -1;
+        if (printed != NULL) {
+            const JsonValue *state = json_get(printed, "state");
+            const JsonValue *frozen = json_get(printed, "frozen");
+            const JsonValue *bridges = json_get(printed, "bridges");
+            long long v[12];
+            size_t k;
+            if (printed->type != JSON_OBJECT || state == NULL ||
+                state->type != JSON_ARRAY || json_count(state) != 12) {
+                set_error(err, err_size, "game: bad printed-card state");
+                goto fail;
+            }
+            for (k = 0; k < 12; k++) {
+                if (json_get_int(json_at(state, k), &v[k]) != 0 ||
+                    v[k] < -1 || v[k] > 1000000) {
+                    set_error(err, err_size, "game: bad printed-card state");
+                    goto fail;
+                }
+            }
+            tmp->leader_conquered_site = (int)v[0];
+            tmp->draw_pending = (int)v[1];
+            tmp->pending_free_leader = (int)v[2];
+            tmp->bonus_pending = (int)v[3];
+            tmp->bonus_area = (int)v[4];
+            tmp->bonus_area_id = (int)v[5];
+            tmp->inv_from = (int)v[6];
+            tmp->inv_to = (int)v[7];
+            tmp->inv_flags = (int)v[8];
+            tmp->inv_attack_bonus = (int)v[9];
+            tmp->toll_by = (int)v[10];
+            tmp->toll_loss = (int)v[11];
+            if (tmp->inv_from >= map->territoryCount ||
+                tmp->inv_to >= map->territoryCount ||
+                tmp->toll_by > tmp->player_count ||
+                tmp->bonus_area > BONUS_PORT) {
+                set_error(err, err_size, "game: bad printed-card state");
+                goto fail;
+            }
+            if (frozen != NULL && (frozen->type != JSON_ARRAY ||
+                json_count(frozen) > (size_t)map->territoryCount)) {
+                set_error(err, err_size, "game: bad frozen territories");
+                goto fail;
+            }
+            for (k = 0; frozen != NULL && k < json_count(frozen); k++) {
+                long long value;
+                if (json_get_int(json_at(frozen, k), &value) != 0 ||
+                    value < 0 || value > tmp->player_count) {
+                    set_error(err, err_size, "game: bad frozen territory");
+                    goto fail;
+                }
+                tmp->frozen_by[k] = (int)value;
+            }
+            if (bridges != NULL && (bridges->type != JSON_ARRAY ||
+                json_count(bridges) > (size_t)map->bridgeCount)) {
+                set_error(err, err_size, "game: bad blocked bridges");
+                goto fail;
+            }
+            for (k = 0; bridges != NULL && k < json_count(bridges); k++) {
+                long long value;
+                if (json_get_int(json_at(bridges, k), &value) != 0 ||
+                    value < 0 || value > tmp->player_count) {
+                    set_error(err, err_size, "game: bad blocked bridge");
+                    goto fail;
+                }
+                tmp->bridge_blocked_by[k] = (int)value;
+            }
         }
     }
     {
@@ -1712,6 +1841,21 @@ int game_from_json(const char *json, struct Game *g, const struct Map *map,
                   "game was saved for map pack \"%s\", not \"%s\"",
                   tmp->map_pack, pack_name);
         goto fail;
+    }
+    {
+        /* A pack update can change the adventure deck (the LOTR pack went
+         * from 36 stand-in cards to the 50 printed ones).  While nobody holds
+         * an adventure card the deck is rebuilt from the pack instead of
+         * rejecting the save. */
+        int held = 0, total, k;
+        total = tmp->adventure_deck_count + tmp->adventure_discard_count;
+        for (k = 0; k < tmp->player_count; k++) {
+            held += tmp->seats[k].adventure_hand_count;
+        }
+        total += held;
+        if (total != map->adventureCardCount && held == 0) {
+            game_rebuild_adventure_deck(tmp);
+        }
     }
     if (validate_loaded(tmp, map, err, err_size) != 0) {
         goto fail;
