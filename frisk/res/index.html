@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FRISK</title>
+<link rel="stylesheet" href="css/frisk.css">
+</head>
+<body>
+<header id="topbar" class="topbar hidden">
+  <a class="brand" href="#lobby">FRISK</a>
+  <span class="who" id="top-user"></span>
+  <span class="badge hidden" id="top-admin">admin</span>
+  <button type="button" class="secondary tiny hidden" id="top-admin-link">Admin</button>
+  <span class="spacer"></span>
+  <button type="button" class="secondary tiny" id="music-toggle" title="Background music">Music: on</button>
+  <button type="button" class="secondary tiny" id="top-lobby">Lobby</button>
+  <button type="button" class="secondary tiny" id="top-logout">Sign out</button>
+</header>
+
+<main>
+  <section id="auth-view">
+    <div class="lobby-head">
+      <h1>FRISK</h1>
+      <p>A LAN game of Middle-earth, in the turns you have time for.</p>
+    </div>
+    <div class="auth-grid">
+      <div class="panel">
+        <h2>Sign in</h2>
+        <form id="login-form" class="row">
+          <div class="field"><label for="login-name">Username</label><input id="login-name" autocomplete="username" required></div>
+          <div class="field"><label for="login-pass">Password</label><input id="login-pass" type="password" autocomplete="current-password" required></div>
+          <button type="submit">Sign in</button>
+        </form>
+        <p id="login-msg" class="msg"></p>
+      </div>
+      <div class="panel">
+        <h2>Create an account</h2>
+        <form id="register-form" class="row">
+          <div class="field"><label for="reg-name">Username</label><input id="reg-name" autocomplete="username" minlength="3" maxlength="31" required></div>
+          <div class="field"><label for="reg-pass">Password (8+)</label><input id="reg-pass" type="password" autocomplete="new-password" minlength="8" required></div>
+          <div class="field"><label for="reg-invite">Invite code</label><input id="reg-invite" autocomplete="off" placeholder="ask an existing player"></div>
+          <button type="submit">Create</button>
+        </form>
+        <p class="small muted">The first account on a fresh database becomes the admin and needs no invite.</p>
+        <p id="register-msg" class="msg"></p>
+      </div>
+    </div>
+  </section>
+
+  <section id="lobby-view" class="hidden">
+    <div class="lobby-head">
+      <h1>FRISK</h1>
+      <p>Claim Middle-earth one turn at a time.</p>
+    </div>
+    <div class="lobby-grid">
+      <div class="panel">
+        <h2>Your games</h2>
+        <div id="your-games" class="game-list"></div>
+      </div>
+      <div class="panel">
+        <h2>Open games</h2>
+        <div id="open-games" class="game-list"></div>
+      </div>
+      <div class="panel">
+        <h2>Running games</h2>
+        <div id="running-games" class="game-list"></div>
+      </div>
+
+      <div class="panel wide">
+        <h2>New game</h2>
+        <form id="create-form" class="row">
+          <div class="field"><label for="create-name">Name</label><input id="create-name" maxlength="60" placeholder="The Long Defeat" required></div>
+          <div class="field"><label for="create-map">Map pack</label><select id="create-map"></select></div>
+          <div class="field"><label for="create-seats">Seats</label>
+            <select id="create-seats"><option value="2">2</option><option value="3">3</option><option value="4">4</option></select>
+          </div>
+          <div class="field"><label for="create-mode">Setup</label>
+            <select id="create-mode"><option value="deal">Deal territories</option><option value="draft">Draft territories</option></select>
+          </div>
+          <div class="field"><label for="create-batch">Armies per placement turn</label><input id="create-batch" type="number" min="1" max="1000" value="5"></div>
+          <div class="field"><label for="create-password">Password (optional)</label><input id="create-password" type="password" autocomplete="new-password"></div>
+          <button type="submit">Create game</button>
+        </form>
+        <p id="create-msg" class="msg"></p>
+      </div>
+
+      <div class="panel wide">
+        <h2>Account</h2>
+        <div class="row">
+          <div class="field"><label for="profile-colour">Colour</label><input id="profile-colour" type="color" value="#d9b23a"></div>
+          <div class="field"><label for="profile-glyph">Glyph</label><input id="profile-glyph" maxlength="15" placeholder="?"></div>
+          <div class="field"><label for="music-volume">Music volume</label><input id="music-volume" type="range" min="0" max="100" step="1" value="45"></div>
+          <button id="save-profile" type="button">Save profile</button>
+          <button id="enable-alerts" type="button" class="secondary">Enable turn alerts</button>
+        </div>
+        <p id="alerts-msg" class="small muted"></p>
+        <p id="profile-msg" class="msg"></p>
+        <details open>
+          <summary>Invites</summary>
+          <div class="row" style="margin-top:10px">
+            <button id="new-invite" type="button">Create an invite</button>
+            <button id="refresh-invites" type="button" class="secondary">Refresh</button>
+          </div>
+          <p id="invite-msg" class="msg"></p>
+          <ul id="invites" class="invites small"></ul>
+        </details>
+      </div>
+
+      <div class="panel wide">
+        <h2>Lobby chat</h2>
+        <div class="chat" id="lobby-chat">
+          <div class="chat-log" id="lobby-chat-log"></div>
+          <p class="chat-status small muted" id="lobby-chat-status"></p>
+          <form class="chat-form" id="lobby-chat-form">
+            <input id="lobby-chat-text" maxlength="500" autocomplete="off" placeholder="Message the lobby">
+            <button type="submit">Send</button>
+          </form>
+          <div class="chat-tools">
+            <div class="taunts" id="lobby-chat-taunts"></div>
+            <label class="small muted chat-autoplay"><input type="checkbox" id="lobby-chat-autoplay"> Autoplay new clips</label>
+          </div>
+          <div class="chat-voice" id="lobby-chat-voice"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="game-view" class="hidden">
+    <div class="game-head">
+      <button type="button" class="secondary tiny" id="back-to-lobby">Lobby</button>
+      <span class="gname" id="game-name"></span>
+      <span class="badge" id="game-status"></span>
+      <span class="phase" id="game-turn"></span>
+      <span class="spacer"></span>
+      <span class="phase" id="game-msg"></span>
+      <button type="button" class="danger tiny hidden" id="resign-game">Resign</button>
+    </div>
+    <div id="replay-bar" class="replay-bar hidden">
+      <span id="replay-label" class="replay-label"></span>
+      <span class="spacer"></span>
+      <button type="button" class="secondary tiny" id="replay-speed">1×</button>
+      <button type="button" class="secondary tiny" id="replay-skip">Skip replay</button>
+    </div>
+    <div class="game-body">
+      <div class="map-panel">
+        <div id="map-container">
+          <div id="map-stage"></div>
+        </div>
+        <div class="map-tools">
+          <button type="button" class="secondary tiny" id="map-fit">Fit</button>
+          <button type="button" class="secondary tiny" id="map-zoom-in">+</button>
+          <button type="button" class="secondary tiny" id="map-zoom-out">−</button>
+        </div>
+      </div>
+      <aside class="side">
+        <div class="panel">
+          <div id="phase-bar" class="phase-bar"></div>
+          <div id="game-actions" class="actions"></div>
+        </div>
+        <div class="panel">
+          <h2>Players</h2>
+          <div id="game-players"></div>
+        </div>
+        <div class="panel">
+          <h2>Cards</h2>
+          <div id="game-hand" class="hand"></div>
+        </div>
+        <div class="panel">
+          <h2>Adventure</h2>
+          <div id="game-adventure" class="adventure"></div>
+        </div>
+        <div class="panel">
+          <h2>Log</h2>
+          <div id="game-log" class="log"></div>
+        </div>
+        <div class="panel">
+          <h2>Chat</h2>
+          <div class="chat" id="game-chat">
+            <div class="chat-log" id="game-chat-log"></div>
+            <p class="chat-status small muted" id="game-chat-status"></p>
+            <form class="chat-form" id="game-chat-form">
+              <input id="game-chat-text" maxlength="500" autocomplete="off" placeholder="Message the table">
+              <button type="submit">Send</button>
+            </form>
+            <div class="chat-tools">
+              <div class="taunts" id="game-chat-taunts"></div>
+              <label class="small muted chat-autoplay"><input type="checkbox" id="game-chat-autoplay"> Autoplay new clips</label>
+            </div>
+            <div class="chat-voice" id="game-chat-voice"></div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <section id="admin-view" class="hidden">
+    <div class="lobby-head">
+      <h1>Admin</h1>
+      <p>Server maintenance for the owner account.</p>
+      <span class="spacer"></span>
+      <button type="button" class="secondary" id="admin-refresh">Refresh</button>
+    </div>
+    <div class="admin-grid">
+      <div class="panel"><h2>Storage</h2><div id="admin-storage"></div></div>
+      <div class="panel wide"><h2>Users</h2><div id="admin-users"></div></div>
+      <div class="panel wide"><h2>Invites</h2><div id="admin-invites"></div></div>
+      <div class="panel wide"><h2>Games</h2><div id="admin-games"></div></div>
+    </div>
+    <p id="admin-msg" class="msg"></p>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+<script src="js/voice.js" defer></script>
+<script src="js/app.js" defer></script>
+</body>
+</html>
