@@ -725,35 +725,73 @@ adventure deck follows the scanned cards in `res/textures/cards/` instead of §0
 effects". The game is still last-player-standing (card points are shown, not scored) and the ten
 Fellowship cards stay out (there is no Ring track). The generic effects stay in the engine for other packs.
 
-- [ ] **10b.1 Card flow from the rulebook** (card section only): deal 4 non-event adventure cards to every
+- [x] **10b.1 Card flow from the rulebook** (card section only): deal 4 non-event adventure cards to every
   player at the start; at the end of a turn in which one of your Leaders conquered a territory with a Site
   of Power, draw 1 card; Event cards ("Play immediately") resolve at once and the drawing continues until
   a Mission or Power card is drawn; more than 4 cards in hand → discard one of your choice. A Leader
   "conquers" a site when it moves in with the conquest. (Replaces §6's leader-on-site end-of-turn draw.)
-- [ ] **10b.2 Board data**: faction sides (Elves, Rohan = good; Mordor, Isengard = evil), ports (ends of
+- [x] **10b.2 Board data**: faction sides (Elves, Rohan = good; Mordor, Isengard = evil), ports (ends of
   sea-lines), bridges (river crossings drawn on the board) and mountain ranges (territories next to each
   range), read off the board scan; plus a re-check of every badge anchor against the printed territory.
-- [ ] **10b.3 Deck (50 cards)**: 13 events (4× Appoint a Second Leader, Aragorn Arrives, The Black Gates
+- [x] **10b.3 Deck (50 cards)**: 13 events (4× Appoint a Second Leader, Aragorn Arrives, The Black Gates
   Open, The Entmoot, They've Brought a Cavetroll, Corsairs of Umbar, Local Uprising, Raiders, The
   Mustering of Middle-earth, Winter Storms), 15 powers (Ambush!, Black Sails, Borne to Another Place,
   Courage Alone Will Not Save You!, 2× Gríma Wormtongue, Move by Night, Siege Machines, Strategic
   Withdrawal, The Enemy Is at Hand!, 2× The Way Is Under the Mountains, Violent Storms, 2× You Shall Not
   Pass!) and the 22 site Missions (good/evil rewards: battalions in a region, territory, any territory or
   port; an extra territory card; Erech's 6 Oathbreakers).
-- [ ] **10b.4 Engine**: invasion tracking (an invasion = attacks from one territory into one territory
+- [x] **10b.4 Engine**: invasion tracking (an invasion = attacks from one territory into one territory
   until it falls or the attacker switches), the new effects, mission claims with reward placement,
   pending choices that pause the end of the turn (a free leader from an event), standing orders for the
   defender's cards (Courage Alone, Strategic Withdrawal, Violent Storms — defenders are offline in async
   play), a state snapshot so a failed action never leaves partial changes, and save-file migration
   (games saved with the old 36-card deck are rebuilt with the new deck while no adventure card is out).
-- [ ] **10b.5 Server and client**: action parameters, legal plays per card, a Play flow per card (pick a
+- [x] **10b.5 Server and client**: action parameters, legal plays per card, a Play flow per card (pick a
   territory, an attack pair, a leader and destination, or a bridge), mission claim and reward placement,
   standing-order selectors, and markers for active effects (frozen territories, blocked bridges, Corsairs).
-- [ ] **10b.6 Tests**: engine tests per printed effect, fuzzing with the new effects (card conservation
+- [x] **10b.6 Tests**: engine tests per printed effect, fuzzing with the new effects (card conservation
   including Local Uprising cards), and a trusted-input browser run that plays every card type.
 
 **Exit check J:** every printed card's effect is covered by an engine test and the browser run plays each
 power, claims missions and resolves events through the real UI.
+
+**M10 verification (2026-11-17):** `tests/test_printed.c` (129 checks) covers every printed effect, the
+rulebook deal and draw chain, the free-Leader and mission-reward pauses, the defenders' standing orders,
+the Oathbreakers and save round-trips. `frisk_fuzz` alternates generic and printed-deck games; 4,000 games
+(5.3 M actions) passed under ASan/UBSan. `tests/browser_cards.py` (in `run_tests.sh`) plays, with trusted
+mouse input, Borne to Another Place, You Shall Not Pass!, a site mission and its battalions, Ambush!,
+Gríma Wormtongue, Siege Machines, Black Sails, The Way Is Under the Mountains and Move by Night, sees the
+defender's Courage Alone standing order fire, and ends the turn into Appoint a Second Leader (event
+drawn → free Leader placed on the map). The other events, and Strategic Withdrawal and Violent Storms
+(standing orders through the same path as Courage Alone), are covered by the engine tests only. A copy
+of the live `game_1.json` (old 36-card deck, setup phase) loads and is rebuilt with the 50-card deck and
+4 cards dealt to each player.
+
+Deviations and findings recorded during M10:
+
+- **Board corrections** read off the board scan: 31 badge anchors moved, the site list now matches the
+  mission cards (Fornost, Forodwaith, Brown Lands, Gap of Rohan, Eregion, Khand, Minhiriath, …),
+  Isengard's stronghold is Fangorn (not Gap of Rohan), 8 missing borders added and 12 wrong ones removed
+  (list in `tools/mkmap.py` `ADJ_ADD`/`ADJ_REMOVE`).
+- **Borders left unchanged pending the owner** (unclear on the scan): Eastern Angmar–Withered Heath
+  (possibly missing), Eastern Angmar–Rhudaur, Mount Doom–Nurn, Barad-Dûr–Nurn, Nurn–Near Harad, North
+  Rhûn–Rhûn Hills, Khand–South Rhûn, Borderlands–Old Forest, The Shire–North Downs / Evendim Hills,
+  Lothlórien–Fangorn; and the Lune Valley–Evendim Hills bridge.
+- **Fortify across a blocked bridge** is allowed only with the Leader moving along (the legal list marks
+  it `needsLeader`), following "only a Leader can lead battalions across".
+- **Fuzz findings fixed:** effects that last "until your next turn" (Winter Storms, Corsairs, You Shall
+  Not Pass!) now end when their owner resigns or is eliminated (a frozen territory never thawed); the
+  rulebook draw stops when only events are left to draw, and the Local Uprising draw stops when only
+  wild territory cards are left (both looped forever). Printed-deck fuzz games may run 100,000 actions.
+- `frisk_fuzz` takes a third argument, the first game number, to replay a reported failure.
+
+**Tooling (owner request 2026-11-17):** `tools/frisk_edit.py` downloads the resource archive from
+`http://ammar.gr/frisk_resources.zip` and runs a local browser editor for a pack's polygons, label anchors,
+borders, sea-lines, bridges, mountain ranges, territory-card symbols and adventure cards. The owner chose
+`map.json` as the source of truth (mkmap.py is a bootstrap that needs `--force`). Saves are validated by
+`mapcheck`, backed up to `frisk/map_backups/`, and may not add, remove or reorder territories or cards
+(saved games index them). `tests/map_editor_test.py` (in `run_tests.sh`) covers the download, the save
+checks (an unchanged save is byte-identical) and the editor with trusted mouse input.
 
 ---
 

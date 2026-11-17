@@ -15,8 +15,12 @@ tints the hexes by owner and overlays army counts; this keeps every territory
 clickable and all game data authoritative in the pack.
 
 Run:
-    python3 -I tools/mkmap.py
+    python3 -I tools/mkmap.py --force
 from the frisk directory.  It rewrites res/maps/lotr/{map.json,board.svg}.
+
+map.json is now edited with tools/frisk_edit.py and is the source of truth;
+this script only bootstraps the pack, so it refuses to overwrite an existing
+map.json without --force (which discards every edit made since).
 """
 
 import json
@@ -767,6 +771,9 @@ def build_svg(data):
 
 
 def main():
+    if os.path.exists(os.path.join(PACK, "map.json")) and "--force" not in sys.argv[1:]:
+        raise SystemExit("res/maps/lotr/map.json exists and may hold editor changes "
+                         "(tools/frisk_edit.py); rerun with --force to regenerate it")
     data = build_map()
     order = data.pop("_order")
     os.makedirs(PACK, exist_ok=True)

@@ -965,21 +965,6 @@ static int run_legal_game(uint64_t seed, int player_count, int mode,
                      g.phase);
             return -1;
         }
-        if (getenv("FUZZ_TRACE") != NULL && (actions >= max_actions - 40 || getenv("FUZZ_TRACE_ALL") != NULL)) {
-            int t, own[4] = {0, 0, 0, 0}, arm[4] = {0, 0, 0, 0};
-            for (t = 0; t < g.territory_count; t++) {
-                if (g.territories[t].owner >= 0) {
-                    own[g.territories[t].owner]++;
-                    arm[g.territories[t].owner] += g.territories[t].armies;
-                }
-            }
-            fprintf(stderr, "turn %d p%d phase %d act %d from %d to %d t %d n %d | "
-                    "lands %d/%d/%d/%d armies %d/%d/%d/%d pend %d bonus %d\n",
-                    g.turn, g.current_player, g.phase, action.type,
-                    action.from, action.to, action.territory, action.count,
-                    own[0], own[1], own[2], own[3], arm[0], arm[1], arm[2],
-                    arm[3], g.reinforcements_pending, g.bonus_pending);
-        }
         if (game_apply(&g, g.current_player, &action, events, &count,
                        error, sizeof(error)) != 0) {
             snprintf(why, why_size, "action %d rejected in phase %d: %.160s",
@@ -1081,6 +1066,7 @@ static int run_arbitrary(int iterations, uint64_t seed,
 int main(int argc, char **argv)
 {
     int games = (argc > 1) ? atoi(argv[1]) : 1000;
+    /* argv[3]: first game number, to replay a reported "FAIL game N". */
     int first = (argc > 3) ? atoi(argv[3]) : 0;
     int arbitrary = (argc > 2) ? atoi(argv[2]) : 10000;
     int failures = 0;

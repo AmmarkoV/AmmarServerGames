@@ -30,6 +30,7 @@ run_suite()
 }
 
 run_suite frisk "$HERE/frisk/tests/run_tests.sh"
+run_suite "frisk map editor" "$HERE/frisk/tests/map_editor_test.py"
 if [ -x "$HERE/frisk/frisk" ]; then
     run_suite "frisk HTTP smoke" "$HERE/frisk/tests/http_smoke.sh"
     run_suite "frisk authorization audit" "$HERE/frisk/tests/auth_audit.py"

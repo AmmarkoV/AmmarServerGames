@@ -366,6 +366,12 @@ static void test_events(void)
     end_turn_with_event(g, "e_must");
     CHECK(g->territories[4].armies == 6 && g->territories[6].armies == 6);
 
+    /* SEABORNE_TOLL: drawing Corsairs of Umbar starts the toll (its effect
+     * on invasions is in test_defender_cards). */
+    init_game(g, PHASE_FORTIFY);
+    end_turn_with_event(g, "e_toll");
+    CHECK(g->toll_by == 1 && g->toll_loss == 3);
+
     /* WINTER_STORMS: no invasions into or out of the drawn territories until
      * the drawer's next turn. */
     init_game(g, PHASE_FORTIFY);

@@ -1,0 +1,677 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FRISK map editor</title>
+<style>
+  :root { --bg: #17140f; --panel: #221d16; --line: #4a3f30; --text: #eadfc8; --dim: #a89a80;
+          --accent: #e0b44a; --bad: #e0605a; --good: #7fbf6a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif;
+         display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+  header { display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 15px; margin: 0 12px 0 0; color: var(--accent); letter-spacing: .08em; }
+  #status { color: var(--dim); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  main { display: grid; grid-template-columns: 1fr 380px; min-height: 0; }
+  #board { width: 100%; height: 100%; background: #0d0b08; touch-action: none; user-select: none; cursor: grab; }
+  #board.drawing { cursor: crosshair; }
+  aside { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+  nav { display: flex; border-bottom: 1px solid var(--line); }
+  nav button { flex: 1; border-radius: 0; border: 0; border-bottom: 2px solid transparent; background: none; }
+  nav button.on { border-bottom-color: var(--accent); color: var(--accent); }
+  .panel { padding: 10px 12px; overflow: auto; flex: 1; }
+  .hidden { display: none !important; }
+  button, select, input, textarea { font: inherit; color: var(--text); background: #2e271e; border: 1px solid var(--line);
+                                    border-radius: 6px; padding: 4px 8px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #1b160e; border-color: var(--accent); font-weight: 600; }
+  label.row { display: grid; grid-template-columns: 96px 1fr; gap: 8px; align-items: center; margin: 6px 0; }
+  label.row input, label.row select { min-width: 0; width: 100%; }
+  label.check { display: inline-flex; gap: 6px; align-items: center; margin-right: 14px; }
+  textarea { width: 100%; resize: vertical; }
+  textarea.bad, input.bad { border-color: var(--bad); }
+  .hint { color: var(--dim); font-size: 12.5px; margin: 6px 0; }
+  .list { border: 1px solid var(--line); border-radius: 6px; max-height: 260px; overflow: auto; margin: 6px 0; }
+  .list div { padding: 3px 8px; cursor: pointer; border-bottom: 1px solid #2c251c; }
+  .list div.on { background: #3a3022; color: var(--accent); }
+  .chips span { display: inline-block; background: #2e271e; border: 1px solid var(--line); border-radius: 10px;
+                padding: 0 8px; margin: 2px; font-size: 12.5px; }
+  h3 { margin: 14px 0 4px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+  #errors { margin: 0; padding: 8px 12px 8px 28px; background: #3a1d1b; color: #ffd2cc; max-height: 30vh; overflow: auto; }
+  #art { max-width: 160px; display: block; margin: 6px 0; border-radius: 6px; }
+  .modes label { margin-right: 10px; }
+  svg text { font-family: system-ui, sans-serif; paint-order: stroke; stroke: #000; fill: #fff; pointer-events: none; }
+  .terr { stroke: #10240f; stroke-width: 1.5; vector-effect: non-scaling-stroke; fill-opacity: .28; }
+  .terr.sel { stroke: var(--accent); stroke-width: 3; fill-opacity: .45; }
+  .terr.pending { stroke: #6ad1ff; stroke-width: 3; }
+  .terr.member { fill: #b9b9ff; fill-opacity: .55; }
+  .anchor { fill: #fff; stroke: #000; stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .anchor.sel { fill: var(--accent); cursor: move; }
+  .vertex { fill: var(--accent); stroke: #000; stroke-width: 1; vector-effect: non-scaling-stroke; cursor: move; }
+  .edge-border { stroke: #f4e7c4; stroke-width: 1.4; vector-effect: non-scaling-stroke; opacity: .75; }
+  .edge-sea { stroke: #6ad1ff; stroke-width: 2; stroke-dasharray: 6 5; vector-effect: non-scaling-stroke; fill: none; }
+  .edge-bridge { stroke: #c9762c; stroke-width: 6; vector-effect: non-scaling-stroke; stroke-linecap: round; }
+  .draft { fill: none; stroke: #6ad1ff; stroke-width: 2; vector-effect: non-scaling-stroke; }
+</style>
+</head>
+<body>
+<header>
+  <h1>FRISK MAP EDITOR</h1>
+  <button id="undo" title="Ctrl+Z">Undo</button>
+  <button id="save" class="primary" title="Ctrl+S">Save</button>
+  <span id="status">Loading…</span>
+</header>
+<main>
+  <svg id="board" xmlns="http://www.w3.org/2000/svg"></svg>
+  <aside>
+    <nav>
+      <button data-tab="territory" class="on">Territories</button>
+      <button data-tab="graph">Connections</button>
+      <button data-tab="cards">Cards</button>
+    </nav>
+    <ol id="errors" class="hidden"></ol>
+
+    <section id="tab-territory" class="panel">
+      <select id="t-pick" style="width:100%"></select>
+      <p class="hint">Click a territory to select it. Drag its yellow corners or its label anchor. Shift+click
+        near an edge to add a corner, right-click a corner to remove it. Corners snap to other territories' corners
+        (hold Alt to stop snapping). Drag empty space to pan, scroll to zoom.</p>
+      <div id="t-form" class="hidden">
+        <label class="row">Name <input id="t-name"></label>
+        <label class="row">Region <select id="t-region"></select></label>
+        <label class="row">Card symbol <select id="t-symbol"><option>A</option><option>B</option><option>C</option></select></label>
+        <div>
+          <label class="check"><input type="checkbox" id="t-stronghold"> Stronghold</label>
+          <label class="check"><input type="checkbox" id="t-site"> Site of Power</label>
+          <label class="check"><input type="checkbox" id="t-port" disabled> Port</label>
+        </div>
+        <p class="hint">Ports follow the sea-lines (Connections tab). Renaming also updates cards that name the territory.</p>
+        <p>
+          <button id="t-redraw">Redraw outline</button>
+          <button id="t-hex">Reset to hexagon</button>
+        </p>
+        <p class="hint" id="t-draw-hint"></p>
+        <h3>Connections</h3>
+        <div id="t-links" class="chips"></div>
+      </div>
+    </section>
+
+    <section id="tab-graph" class="panel hidden">
+      <div class="modes">
+        <label><input type="radio" name="mode" value="border" checked> Border</label>
+        <label><input type="radio" name="mode" value="sea"> Sea-line</label>
+        <label><input type="radio" name="mode" value="bridge"> Bridge</label>
+        <label><input type="radio" name="mode" value="mountain"> Mountain range</label>
+      </div>
+      <p class="hint" id="g-hint"></p>
+      <div id="g-mountain" class="hidden">
+        <p><select id="g-range"></select>
+          <button id="g-range-add">New</button> <button id="g-range-rename">Rename</button>
+          <button id="g-range-del">Delete</button></p>
+        <div id="g-members" class="chips"></div>
+      </div>
+      <h3>Totals</h3>
+      <div id="g-totals" class="hint"></div>
+    </section>
+
+    <section id="tab-cards" class="panel hidden">
+      <p><input id="c-filter" placeholder="Filter cards" style="width:58%">
+        <select id="c-kind"><option value="">all kinds</option><option>mission</option><option>event</option><option>power</option></select></p>
+      <div id="c-list" class="list"></div>
+      <div id="c-form" class="hidden">
+        <label class="row">Id <input id="c-id" disabled></label>
+        <label class="row">Kind <select id="c-kind-edit"><option>mission</option><option>event</option><option>power</option></select></label>
+        <label class="row">Title <input id="c-title"></label>
+        <label class="row">Effect <select id="c-effect"></select></label>
+        <h3>Text</h3>
+        <textarea id="c-text" rows="4"></textarea>
+        <h3>Arguments (JSON)</h3>
+        <textarea id="c-args" rows="5" spellcheck="false"></textarea>
+        <label class="row">Image <select id="c-image"></select></label>
+        <img id="art" alt="">
+      </div>
+      <p class="hint">Cards are edited in place; saved games refer to them by position, so cards cannot be added
+        or removed here. Territory-card symbols are on the Territories tab.</p>
+    </section>
+  </aside>
+</main>
+<script>
+"use strict";
+const NS = "http://www.w3.org/2000/svg";
+const $ = (id) => document.getElementById(id);
+const svg = $("board");
+let data = null, meta = null, view = null;
+let tab = "territory", selected = -1, pendingA = -1, range = 0, card = -1;
+let drawing = null;            // points of an outline being drawn
+let history = [], dirty = false;
+let drag = null;               // {kind: 'vertex'|'label'|'pan', ...}
+
+/* ---------------- data helpers ---------------- */
+const T = () => data.territories;
+function parsePath(d) {
+  const nums = (d.match(/-?\d+(\.\d+)?/g) || []).map(Number);
+  const pts = [];
+  for (let i = 0; i + 1 < nums.length; i += 2) pts.push([nums[i], nums[i + 1]]);
+  return pts;
+}
+const fmt = (v) => (Math.round(v * 10) / 10).toFixed(1);
+const toPath = (pts) => "M " + pts.map(([x, y]) => `${fmt(x)},${fmt(y)}`).join(" L ") + " Z";
+const straight = (a, b) => `M ${T()[a].label[0]},${T()[a].label[1]} L ${T()[b].label[0]},${T()[b].label[1]}`;
+const pair = (a, b) => (x) => (x.a === a && x.b === b) || (x.a === b && x.b === a);
+function snapshot() {
+  history.push(JSON.stringify(data));
+  if (history.length > 200) history.shift();
+  setDirty(true);
+}
+function setDirty(on) {
+  dirty = on;
+  $("status").textContent = on ? "Unsaved changes" : "Saved";
+}
+function syncPorts() {
+  const ends = new Set();
+  data.links.forEach((l) => { if (l.kind === "sea") { ends.add(l.a); ends.add(l.b); } });
+  T().forEach((t, i) => { t.port = ends.has(i); });
+}
+function renameEverywhere(oldName, newName) {
+  const walk = (v) => {
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === "object") { for (const k in v) v[k] = walk(v[k]); return v; }
+    return v === oldName ? newName : v;
+  };
+  data.adventureCards.forEach((c) => { c.args = walk(c.args); });
+}
+
+/* ---------------- view and coordinates ---------------- */
+function setView() { svg.setAttribute("viewBox", `${view.x} ${view.y} ${view.w} ${view.h}`); }
+function toMap(evt) {
+  const p = svg.createSVGPoint();
+  p.x = evt.clientX; p.y = evt.clientY;
+  const q = p.matrixTransform(svg.getScreenCTM().inverse());
+  return [q.x, q.y];
+}
+const unitsPerPixel = () => 1 / svg.getScreenCTM().a;
+function snap(point, evt, skip) {
+  if (evt.altKey) return point;
+  const limit = 8 * unitsPerPixel();
+  let best = null, bestD = limit;
+  T().forEach((t, i) => {
+    if (i === skip) return;
+    for (const q of parsePath(t.path)) {
+      const d = Math.hypot(q[0] - point[0], q[1] - point[1]);
+      if (d < bestD) { bestD = d; best = q; }
+    }
+  });
+  return best ? [best[0], best[1]] : point;
+}
+
+/* ---------------- rendering ---------------- */
+function el(name, attrs, parent) {
+  const node = document.createElementNS(NS, name);
+  for (const k in attrs) node.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(node);
+  return node;
+}
+function render() {
+  svg.textContent = "";
+  if (meta.background) {
+    el("image", { href: "/pack/" + meta.background, x: 0, y: 0, width: data.image.width,
+                  height: data.image.height, preserveAspectRatio: "none" }, svg);
+  }
+  const colors = Object.fromEntries(data.regions.map((r) => [r.id, r.color || "#888"]));
+  const members = tab === "graph" && mode() === "mountain" && data.mountains[range]
+    ? new Set(data.mountains[range].territories) : new Set();
+  const polys = el("g", {}, svg);
+  T().forEach((t, i) => {
+    const cls = ["terr"];
+    if (i === selected && tab === "territory") cls.push("sel");
+    if (i === pendingA) cls.push("pending");
+    if (members.has(i)) cls.push("member");
+    el("path", { d: t.path, class: cls.join(" "), fill: colors[t.region], "data-t": i }, polys);
+  });
+  if (tab === "graph") {
+    const edges = el("g", {}, svg);
+    const L = (i) => T()[i].label;
+    T().forEach((t, i) => t.adjacent.forEach((n) => {
+      if (n > i) el("line", { x1: L(i)[0], y1: L(i)[1], x2: L(n)[0], y2: L(n)[1], class: "edge-border" }, edges);
+    }));
+    (data.bridges || []).forEach((b) => {
+      const mx = (L(b.a)[0] + L(b.b)[0]) / 2, my = (L(b.a)[1] + L(b.b)[1]) / 2;
+      const dx = (L(b.b)[0] - L(b.a)[0]) * 0.12, dy = (L(b.b)[1] - L(b.a)[1]) * 0.12;
+      el("line", { x1: mx - dx, y1: my - dy, x2: mx + dx, y2: my + dy, class: "edge-bridge" }, edges);
+    });
+    data.links.forEach((l) => el("path", { d: l.path, class: "edge-sea" }, edges));
+  }
+  const labels = el("g", {}, svg);
+  const r = 4.5 * unitsPerPixel();
+  T().forEach((t, i) => {
+    const sel = i === selected && tab === "territory";
+    el("circle", { cx: t.label[0], cy: t.label[1], r: sel ? r * 1.5 : r, class: "anchor" + (sel ? " sel" : ""),
+                   "data-t": i, "data-label": sel ? 1 : "" }, labels);
+    const text = el("text", { x: t.label[0] + r * 1.6, y: t.label[1] + r, "font-size": 11 * unitsPerPixel(),
+                              "stroke-width": 3 * unitsPerPixel() }, labels);
+    text.textContent = t.name;
+  });
+  if (tab === "territory" && selected >= 0 && !drawing) {
+    const handles = el("g", {}, svg);
+    parsePath(T()[selected].path).forEach(([x, y], k) =>
+      el("circle", { cx: x, cy: y, r: r, class: "vertex", "data-v": k }, handles));
+  }
+  if (drawing && drawing.length) {
+    el("polyline", { points: drawing.map((p) => p.join(",")).join(" "), class: "draft" }, svg);
+    drawing.forEach(([x, y]) => el("circle", { cx: x, cy: y, r: r, class: "vertex" }, svg));
+  }
+}
+
+function renderSide() {
+  document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
+  ["territory", "graph", "cards"].forEach((name) => $("tab-" + name).classList.toggle("hidden", name !== tab));
+  if (tab === "territory") renderTerritory();
+  if (tab === "graph") renderGraph();
+  if (tab === "cards") renderCards();
+}
+
+function renderTerritory() {
+  const pick = $("t-pick");
+  pick.textContent = "";
+  const none = document.createElement("option");
+  none.value = -1; none.textContent = "— select a territory —";
+  pick.append(none);
+  T().map((t, i) => [t.name, i]).sort().forEach(([name, i]) => {
+    const o = document.createElement("option");
+    o.value = i; o.textContent = name;
+    pick.append(o);
+  });
+  pick.value = selected;
+  $("t-form").classList.toggle("hidden", selected < 0);
+  if (selected < 0) return;
+  const t = T()[selected];
+  $("t-name").value = t.name;
+  const region = $("t-region");
+  region.textContent = "";
+  data.regions.forEach((r) => {
+    const o = document.createElement("option");
+    o.value = r.id; o.textContent = `${r.name} (+${r.bonus})`;
+    region.append(o);
+  });
+  region.value = t.region;
+  const tc = data.territoryCards.find((c) => c.territory === selected);
+  $("t-symbol").disabled = !tc;
+  $("t-symbol").value = tc ? tc.symbol : "A";
+  $("t-stronghold").checked = !!t.stronghold;
+  $("t-site").checked = !!t.site;
+  $("t-port").checked = !!t.port;
+  $("t-draw-hint").textContent = drawing
+    ? "Click to add corners; click the first corner or press Enter to finish, Esc to cancel." : "";
+  const chips = $("t-links");
+  chips.textContent = "";
+  const add = (text) => { const s = document.createElement("span"); s.textContent = text; chips.append(s); };
+  t.adjacent.forEach((n) => add(T()[n].name +
+    ((data.bridges || []).some(pair(selected, n)) ? " (bridge)" : "")));
+  data.links.filter((l) => l.a === selected || l.b === selected)
+    .forEach((l) => add("⚓ " + T()[l.a === selected ? l.b : l.a].name));
+  (data.mountains || []).filter((m) => m.territories.includes(selected)).forEach((m) => add("⛰ " + m.name));
+}
+
+const mode = () => document.querySelector("input[name=mode]:checked").value;
+function renderGraph() {
+  const m = mode();
+  const hints = {
+    border: "Click two territories to add or remove the border between them (land borders, at most 10 each).",
+    sea: "Click two territories to add or remove a sea-line. Ports are updated to match.",
+    bridge: "Click two bordering territories to add or remove a bridge (You Shall Not Pass!).",
+    mountain: "Pick a range, then click territories to add them to it or remove them.",
+  };
+  $("g-hint").textContent = hints[m] + (pendingA >= 0 ? `  First: ${T()[pendingA].name}.` : "");
+  $("g-mountain").classList.toggle("hidden", m !== "mountain");
+  const sel = $("g-range");
+  sel.textContent = "";
+  (data.mountains || []).forEach((r, i) => {
+    const o = document.createElement("option");
+    o.value = i; o.textContent = r.name;
+    sel.append(o);
+  });
+  sel.value = String(range);
+  const members = $("g-members");
+  members.textContent = "";
+  ((data.mountains || [])[range] || { territories: [] }).territories.forEach((i) => {
+    const s = document.createElement("span"); s.textContent = T()[i].name; members.append(s);
+  });
+  const borders = T().reduce((n, t) => n + t.adjacent.length, 0) / 2;
+  $("g-totals").textContent = `${borders} borders · ${data.links.length} sea-lines · ` +
+    `${(data.bridges || []).length} bridges · ${(data.mountains || []).length} mountain ranges`;
+}
+
+function renderCards() {
+  const filter = $("c-filter").value.toLowerCase(), kind = $("c-kind").value;
+  const list = $("c-list");
+  list.textContent = "";
+  data.adventureCards.forEach((c, i) => {
+    if (kind && c.kind !== kind) return;
+    if (filter && !`${c.id} ${c.title} ${c.effect} ${c.text}`.toLowerCase().includes(filter)) return;
+    const row = document.createElement("div");
+    row.textContent = `${c.id} · ${c.title}`;
+    row.className = i === card ? "on" : "";
+    row.onclick = () => { card = i; renderCards(); };
+    list.append(row);
+  });
+  $("c-form").classList.toggle("hidden", card < 0);
+  if (card < 0) return;
+  const c = data.adventureCards[card];
+  $("c-id").value = c.id;
+  $("c-kind-edit").value = c.kind;
+  $("c-title").value = c.title;
+  $("c-text").value = c.text || "";
+  const effect = $("c-effect");
+  effect.textContent = "";
+  meta.effects.forEach((e) => { const o = document.createElement("option"); o.textContent = e; effect.append(o); });
+  effect.value = c.effect;
+  const args = $("c-args");
+  args.value = JSON.stringify(c.args || {}, null, 1);
+  args.classList.remove("bad");
+  const image = $("c-image");
+  image.textContent = "";
+  ["", ...meta.cardImages].forEach((p) => {
+    const o = document.createElement("option"); o.value = p; o.textContent = p || "(none)"; image.append(o);
+  });
+  image.value = c.image || "";
+  $("art").src = c.image ? "/pack/" + c.image : "";
+  $("art").classList.toggle("hidden", !c.image);
+}
+
+function refresh() { render(); renderSide(); }
+
+/* ---------------- actions ---------------- */
+function selectTerritory(i) { selected = i; drawing = null; refresh(); }
+
+function toggleEdge(a, b) {
+  const m = mode();
+  const ta = T()[a], tb = T()[b];
+  if (m === "border") {
+    snapshot();
+    if (ta.adjacent.includes(b)) {
+      ta.adjacent = ta.adjacent.filter((x) => x !== b);
+      tb.adjacent = tb.adjacent.filter((x) => x !== a);
+      if (data.bridges) data.bridges = data.bridges.filter((x) => !pair(a, b)(x));
+    } else {
+      if (ta.adjacent.length >= 10 || tb.adjacent.length >= 10) {
+        history.pop();
+        return status("A territory can have at most 10 land borders.");
+      }
+      ta.adjacent.push(b); tb.adjacent.push(a);
+      ta.adjacent.sort((x, y) => x - y); tb.adjacent.sort((x, y) => x - y);
+    }
+  } else if (m === "sea") {
+    snapshot();
+    const k = data.links.findIndex(pair(a, b));
+    if (k >= 0) data.links.splice(k, 1);
+    else data.links.push({ a: Math.min(a, b), b: Math.max(a, b), kind: "sea", path: straight(Math.min(a, b), Math.max(a, b)) });
+    syncPorts();
+  } else if (m === "bridge") {
+    if (!ta.adjacent.includes(b)) return status("A bridge needs a border: add the border first.");
+    snapshot();
+    data.bridges = data.bridges || [];
+    const k = data.bridges.findIndex(pair(a, b));
+    if (k >= 0) data.bridges.splice(k, 1);
+    else data.bridges.push({ a: Math.min(a, b), b: Math.max(a, b) });
+  }
+}
+
+function addCorner(p) {
+  const pts = parsePath(T()[selected].path);
+  let best = -1, bestD = 12 * unitsPerPixel(), proj = null;
+  pts.forEach((a, k) => {
+    const b = pts[(k + 1) % pts.length];
+    const vx = b[0] - a[0], vy = b[1] - a[1];
+    const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / (vx * vx + vy * vy || 1)));
+    const q = [a[0] + vx * t, a[1] + vy * t];
+    const d = Math.hypot(q[0] - p[0], q[1] - p[1]);
+    if (d < bestD) { bestD = d; best = k; proj = q; }
+  });
+  if (best < 0) return status("Shift+click closer to an edge of the selected territory.");
+  snapshot();
+  pts.splice(best + 1, 0, proj);
+  T()[selected].path = toPath(pts);
+  render();
+}
+
+function clickTerritory(i) {
+  if (tab === "territory") return i === selected ? undefined : selectTerritory(i);
+  if (tab === "graph") {
+    if (mode() === "mountain") {
+      const r = (data.mountains || [])[range];
+      if (!r) return status("Create a mountain range first.");
+      snapshot();
+      r.territories = r.territories.includes(i) ? r.territories.filter((x) => x !== i)
+        : [...r.territories, i].sort((x, y) => x - y);
+    } else if (pendingA < 0 || pendingA === i) {
+      pendingA = pendingA === i ? -1 : i;
+    } else {
+      toggleEdge(pendingA, i);
+      pendingA = -1;
+    }
+    refresh();
+  }
+}
+
+function moveLabel(i, point) {
+  const t = T()[i];
+  const old = t.label.slice();
+  const touching = data.links.filter((l) => (l.a === i || l.b === i) && l.path === straight(l.a, l.b));
+  t.label = [Math.round(point[0]), Math.round(point[1])];
+  touching.forEach((l) => { l.path = straight(l.a, l.b); });
+  return old;
+}
+
+function finishDrawing() {
+  if (!drawing || drawing.length < 3) return status("An outline needs at least 3 corners.");
+  snapshot();
+  T()[selected].path = toPath(drawing);
+  drawing = null;
+  svg.classList.remove("drawing");
+  refresh();
+}
+
+function status(text) { $("status").textContent = text; }
+
+/* ---------------- pointer input ---------------- */
+svg.addEventListener("pointerdown", (evt) => {
+  if (evt.button !== 0) return;
+  const target = evt.target;
+  const start = { x: evt.clientX, y: evt.clientY };
+  if (tab === "territory" && target.dataset.v !== undefined && !drawing) {
+    snapshot();
+    drag = { kind: "vertex", index: Number(target.dataset.v), start, moved: true };
+  } else if (tab === "territory" && target.dataset.label === "1" && !drawing) {
+    snapshot();
+    drag = { kind: "label", start, moved: true };
+  } else {
+    const t = target.closest && target.closest("[data-t]");
+    drag = { kind: "pan", start, view: { ...view }, upp: unitsPerPixel(), moved: false,
+             t: t ? Number(t.dataset.t) : -1 };
+  }
+  svg.setPointerCapture(evt.pointerId);
+});
+svg.addEventListener("pointermove", (evt) => {
+  if (!drag) return;
+  if (drag.kind === "vertex") {
+    const pts = parsePath(T()[selected].path);
+    pts[drag.index] = snap(toMap(evt), evt, selected);
+    T()[selected].path = toPath(pts);
+    render();
+  } else if (drag.kind === "label") {
+    moveLabel(selected, toMap(evt));
+    render();
+  } else {
+    const dx = evt.clientX - drag.start.x, dy = evt.clientY - drag.start.y;
+    if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+    drag.moved = true;
+    svg.style.cursor = "grabbing";
+    view.x = drag.view.x - dx * drag.upp;
+    view.y = drag.view.y - dy * drag.upp;
+    setView();
+  }
+});
+svg.addEventListener("pointerup", (evt) => {
+  const d = drag;
+  drag = null;
+  svg.style.cursor = "";
+  if (!d) return;
+  if (d.kind !== "pan") return renderSide();
+  if (d.moved) return render();
+  if (drawing) {
+    const p = snap(toMap(evt), evt, selected);
+    const first = drawing[0];
+    if (drawing.length >= 3 && Math.hypot(first[0] - p[0], first[1] - p[1]) < 10 * unitsPerPixel()) {
+      return finishDrawing();
+    }
+    drawing.push(p);
+    return render();
+  }
+  if (tab === "territory" && evt.shiftKey && selected >= 0) return addCorner(toMap(evt));
+  if (d.t >= 0) clickTerritory(d.t);
+  else if (tab === "graph") { pendingA = -1; refresh(); }
+});
+svg.addEventListener("contextmenu", (evt) => {
+  if (evt.target.dataset.v === undefined || tab !== "territory") return;
+  evt.preventDefault();
+  const pts = parsePath(T()[selected].path);
+  if (pts.length <= 3) return status("An outline needs at least 3 corners.");
+  snapshot();
+  pts.splice(Number(evt.target.dataset.v), 1);
+  T()[selected].path = toPath(pts);
+  render();
+});
+svg.addEventListener("wheel", (evt) => {
+  evt.preventDefault();
+  const [mx, my] = toMap(evt);
+  const k = evt.deltaY > 0 ? 1.15 : 1 / 1.15;
+  const w = Math.min(Math.max(view.w * k, 80), data.image.width * 3);
+  const s = w / view.w;
+  view = { x: mx - (mx - view.x) * s, y: my - (my - view.y) * s, w, h: view.h * s };
+  setView();
+  render();
+}, { passive: false });
+
+/* ---------------- side panel input ---------------- */
+document.querySelectorAll("nav button").forEach((b) => b.onclick = () => {
+  tab = b.dataset.tab; pendingA = -1; drawing = null; svg.classList.remove("drawing"); refresh();
+});
+$("t-pick").onchange = (e) => selectTerritory(Number(e.target.value));
+$("t-name").onchange = (e) => {
+  const name = e.target.value.trim();
+  const t = T()[selected];
+  if (!name || name === t.name) return renderTerritory();
+  if (T().some((x) => x.name === name)) { status(`"${name}" is already used.`); return renderTerritory(); }
+  snapshot();
+  renameEverywhere(t.name, name);
+  t.name = name;
+  refresh();
+};
+$("t-region").onchange = (e) => { snapshot(); T()[selected].region = Number(e.target.value); refresh(); };
+$("t-symbol").onchange = (e) => {
+  snapshot(); data.territoryCards.find((c) => c.territory === selected).symbol = e.target.value;
+};
+$("t-stronghold").onchange = (e) => { snapshot(); T()[selected].stronghold = e.target.checked; };
+$("t-site").onchange = (e) => { snapshot(); T()[selected].site = e.target.checked; };
+$("t-redraw").onclick = () => { drawing = []; svg.classList.add("drawing"); refresh(); };
+$("t-hex").onclick = () => {
+  snapshot();
+  const [cx, cy] = T()[selected].label;
+  T()[selected].path = toPath([0, 1, 2, 3, 4, 5].map((k) =>
+    [cx + 20 * Math.cos(k * Math.PI / 3), cy - 20 * Math.sin(k * Math.PI / 3)]));
+  refresh();
+};
+document.querySelectorAll("input[name=mode]").forEach((r) => r.onchange = () => { pendingA = -1; refresh(); });
+$("g-range").onchange = (e) => { range = Number(e.target.value); refresh(); };
+$("g-range-add").onclick = () => {
+  const name = prompt("Name of the new mountain range");
+  if (!name) return;
+  snapshot();
+  data.mountains = data.mountains || [];
+  data.mountains.push({ name, territories: [] });
+  range = data.mountains.length - 1;
+  refresh();
+};
+$("g-range-rename").onclick = () => {
+  const r = (data.mountains || [])[range];
+  const name = r && prompt("New name", r.name);
+  if (!name) return;
+  snapshot(); r.name = name; refresh();
+};
+$("g-range-del").onclick = () => {
+  const r = (data.mountains || [])[range];
+  if (!r || !confirm(`Delete the range "${r.name}"?`)) return;
+  snapshot(); data.mountains.splice(range, 1); range = 0; refresh();
+};
+$("c-filter").oninput = renderCards;
+$("c-kind").onchange = renderCards;
+const cardField = (id, key, parse = (v) => v) => {
+  $(id).onchange = (e) => {
+    snapshot();
+    const value = parse(e.target.value);
+    if (value === "") delete data.adventureCards[card][key]; else data.adventureCards[card][key] = value;
+    renderCards();
+  };
+};
+cardField("c-kind-edit", "kind");
+cardField("c-title", "title");
+cardField("c-text", "text");
+cardField("c-effect", "effect");
+cardField("c-image", "image");
+$("c-args").oninput = (e) => {
+  try { JSON.parse(e.target.value); e.target.classList.remove("bad"); } catch (err) { e.target.classList.add("bad"); }
+};
+$("c-args").onchange = (e) => {
+  let value;
+  try { value = JSON.parse(e.target.value); } catch (err) { return status("Arguments are not valid JSON; not applied."); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return status("Arguments must be a JSON object.");
+  snapshot();
+  data.adventureCards[card].args = value;
+};
+
+/* ---------------- save, undo, keys ---------------- */
+async function save() {
+  status("Saving…");
+  const result = await fetch("/api/save", { method: "POST", body: JSON.stringify(data) }).then((r) => r.json());
+  const box = $("errors");
+  box.textContent = "";
+  box.classList.toggle("hidden", result.ok);
+  if (!result.ok) {
+    result.errors.forEach((e) => { const li = document.createElement("li"); li.textContent = e; box.append(li); });
+    return status("Not saved: fix the problems listed on the right.");
+  }
+  setDirty(false);
+  status(`Saved (backup in ${result.backup}). Restart the frisk server to use the changes.`);
+}
+function undo() {
+  if (!history.length) return status("Nothing to undo.");
+  data = JSON.parse(history.pop());
+  pendingA = -1;
+  setDirty(true);
+  refresh();
+}
+$("save").onclick = save;
+$("undo").onclick = undo;
+document.addEventListener("keydown", (evt) => {
+  const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
+  if ((evt.ctrlKey || evt.metaKey) && evt.key === "s") { evt.preventDefault(); save(); }
+  else if ((evt.ctrlKey || evt.metaKey) && evt.key === "z" && !typing) { evt.preventDefault(); undo(); }
+  else if (drawing && evt.key === "Enter") finishDrawing();
+  else if (evt.key === "Escape") { drawing = null; pendingA = -1; svg.classList.remove("drawing"); refresh(); }
+});
+window.addEventListener("beforeunload", (evt) => { if (dirty) { evt.preventDefault(); evt.returnValue = ""; } });
+
+fetch("/api/state").then((r) => r.json()).then((state) => {
+  meta = state;
+  data = state.map;
+  view = { x: 0, y: 0, w: data.image.width, h: data.image.height };
+  svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+  setView();
+  status(`Editing ${state.pack}`);
+  refresh();
+});
+</script>
+</body>
+</html>

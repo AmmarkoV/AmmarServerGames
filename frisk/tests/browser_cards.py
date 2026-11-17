@@ -2,11 +2,14 @@
 """Play the printed LOTR adventure cards through the real UI (PLAN.md 10b).
 
 Starts an isolated server with the client and the LOTR pack, deals a game,
-then edits the saved game (server stopped) so seat 0 holds Borne to Another
-Place, You Shall Not Pass!, Ambush!, The Way Is Under the Mountains, Move by
-Night and a site mission with a Leader on its site, and seat 1 holds Courage
-Alone Will Not Save You! as a standing order.  Headless Chrome then plays the
-cards with trusted mouse input and the server state is checked after each.
+then edits the saved game (server stopped): seat 0 holds Borne to Another
+Place, You Shall Not Pass!, Ambush!, Gríma Wormtongue, Siege Machines, Black
+Sails, The Way Is Under the Mountains, Move by Night and a site mission, has
+one Leader, a sea-line and a stronghold to invade, and Appoint a Second Leader
+on top of the deck with a site conquest recorded (so the end of the turn draws
+it); seat 1 holds Courage Alone Will Not Save You! as a standing order.
+Headless Chrome then plays the cards with trusted mouse input and the server
+state is checked after each.
 
 Skips (exit 0) without Chrome/Chromium, Python `websockets` or the LOTR pack
 (res/maps/lotr is not in git).
@@ -66,14 +69,27 @@ def arrange(path, meta, me):
                    c["args"]["reward"] in ("region", "territory", "any", "port"))
     site = names[mission["args"]["site"]]
     leader = next(t for t in mine if t != site)
-    terr[site]["leader"] = me + 1
-    terr[leader]["leader"] = me + 1
-    g["players"][me]["leaders"] = 2
+    terr[leader]["leader"] = me + 1            # Borne to Another Place moves it to the site
+    g["players"][me]["leaders"] = 1
     g["players"][other]["leaders"] = 0
+    keep = {site, leader}
+    # A sea-line invasion (Black Sails) and a stronghold invasion (Siege
+    # Machines); bridge 3 (Rhudaur) gets blocked by You Shall Not Pass!.
+    blocked = {meta["bridges"][3]["a"], meta["bridges"][3]["b"]}
+    sea = next((l["a"], l["b"]) for l in meta["links"]
+               if l["kind"] == "sea" and not {l["a"], l["b"]} & (keep | blocked))
+    keep |= set(sea)
+    siege = next((n, s) for s, t in enumerate(meta["territories"]) if t["stronghold"]
+                 for n in t["adjacent"] if not {n, s} & (keep | blocked))
+    for t, owner in ((sea[0], me), (sea[1], other), (siege[0], me), (siege[1], other)):
+        terr[t]["owner"] = owner
+        terr[t]["neutral"] = False
+        terr[t]["armies"] = 9 if owner == me else 3
+    mine = [i for i, t in enumerate(terr) if t["owner"] == me]
     for p in g["players"]:
         g["decks"]["adventure"].extend(p["adventureHand"])
         p["adventureHand"], p["adventureAuto"], p["adventureAutoN"] = [], [], []
-    for cid in ("p03", "p14", "p01", "p11", "p07", mission["id"]):
+    for cid in ("p03", "p14", "p01", "p05", "p08", "p02", "p11", "p07", mission["id"]):
         g["decks"]["adventure"].remove(index[cid])
         g["players"][me]["adventureHand"].append(index[cid])
         g["players"][me]["adventureAuto"].append(0)
@@ -82,8 +98,16 @@ def arrange(path, meta, me):
     g["players"][other]["adventureHand"] = [index["p04"]]
     g["players"][other]["adventureAuto"] = [2]      # standing order: always
     g["players"][other]["adventureAutoN"] = [1]
-    json.dump(g, open(path, "w"))
-    return mine, site, leader, mission
+    # Appoint a Second Leader on top of the deck, drawn at the end of the turn
+    for pile in ("adventure", "adventureDiscard"):
+        if index["e01"] in g["decks"][pile]:
+            g["decks"][pile].remove(index["e01"])
+    g["decks"]["adventure"].append(index["e01"])
+    g["printed"]["state"][0] = 1                # a Leader conquered a site
+    # The engine's reader takes raw UTF-8 only (no \\u escapes), as it writes.
+    with open(path, "w", encoding="utf-8") as out:
+        json.dump(g, out, ensure_ascii=False)
+    return mine, site, leader, mission, sea, siege
 
 
 async def run(chrome_bin, websockets):
@@ -117,7 +141,7 @@ async def run(chrome_bin, websockets):
         me = state["you"]
         server.terminate()
         server.wait(timeout=10)
-        mine, site, leader, mission = arrange(
+        mine, site, leader, mission, sea, siege = arrange(
             os.path.join(tmp, "data", "games", f"game_{game_id}.json"), meta, me)
         server, base = start_server(PORT, tmp)
         session, csrf = login(base, "anna")
@@ -126,11 +150,6 @@ async def run(chrome_bin, websockets):
             return get(session, base + "/api/game/state", {"g": game_id})
 
         loaded = state_now()
-        if "phase" not in loaded:
-            print("DEBUGLOAD", loaded, [l for l in open(os.path.join(tmp, "server.log"), errors="replace").read().splitlines()
-                                        if "game" in l.lower() or "corrupt" in l.lower()][-8:])
-            shutil.copy(os.path.join(tmp, "data", "games", f"game_{game_id}.json"),
-                        "/tmp/claude-1000/-home-ammar-Documents-Programming-AmmarServer-src-AmmarServerGames/b457a48b-bc7c-4356-84e9-a1e7618d7472/scratchpad/bad_game.json")
         require(loaded.get("phase") == "reinforce", "the arranged game loads")
 
         profile = os.path.join(tmp, "chrome")
@@ -198,13 +217,12 @@ async def run(chrome_bin, websockets):
                 await asyncio.sleep(0.6)
                 return True
 
-            # Borne to Another Place
-            destination = next(t for t in mine if t not in (site, leader))
+            # Borne to Another Place: the Leader goes to the mission's site
             require(await tile_button("p03"), "Borne to Another Place has a Play button")
             await click_territory(leader)
-            await click_territory(destination)
+            await click_territory(site)
             st = state_now()
-            check(st["territories"][destination]["leader"] == me + 1 and
+            check(st["territories"][site]["leader"] == me + 1 and
                   st["territories"][leader]["leader"] == 0, "Borne to Another Place moved the Leader")
 
             # You Shall Not Pass!
@@ -232,29 +250,60 @@ async def run(chrome_bin, websockets):
             check(st["printed"]["bonus"] == 0 and st["territories"][target]["armies"] > before,
                   "the mission battalions are on the board")
 
-            # Ambush! on a selected invasion; the defender's Courage Alone answers
-            # 2-player games have neutral territories: invade one of bert's
+            def finish_conquest():
+                st = state_now()
+                if st["phase"] == "conquest_move":
+                    act(base, session, csrf, game_id, "move_in", **{
+                        "from": st["pending"]["from"], "to": st["pending"]["to"], "count": st["pending"]["min"]})
+
+            async def select(pair_from, pair_to):
+                await click_territory(pair_from)
+                await click_territory(pair_to)
+
+            # Ambush! and Gríma on a selected invasion; the defender's Courage Alone answers
+            # (2-player games have neutral territories: invade one of bert's)
             pair = next(a for a in st["legal"]["attacks"]
-                        if st["territories"][a["to"]]["owner"] == 1 - me)
-            await click_territory(pair["from"])
-            await click_territory(pair["to"])
+                        if st["territories"][a["to"]]["owner"] == 1 - me and
+                        not {a["from"], a["to"]} & {*sea, *siege})
+            await select(pair["from"], pair["to"])
             before = st["territories"][pair["from"]]["armies"]
             require(await click_button("#game-actions", "Play Ambush!"), "Ambush! is offered for the invasion")
             check(state_now()["territories"][pair["from"]]["armies"] == before + 3, "Ambush! added 3 battalions")
-            await click_territory(pair["from"])
-            await click_territory(pair["to"])
+            await select(pair["from"], pair["to"])
+            require(await click_button("#game-actions", "Play Gríma Wormtongue"), "Gríma is offered for the invasion")
+            st = state_now()
+            check(st["territories"][pair["to"]]["armies"] == 1 and
+                  st["territories"][pair["from"]]["armies"] == before + 5,
+                  "Gríma moved 2 enemy battalions to the invading territory")
+            await select(pair["from"], pair["to"])
             require(await click_button("#game-actions", "1 die"), "the invasion can be attacked")
             log = [e["text"] for e in state_now()["log"]]
             check(any("Courage Alone" in line for line in log),
                   "the defender's Courage Alone standing order fired" +
                   ("" if any("Courage Alone" in line for line in log) else ": " + " | ".join(log[-8:])))
 
+            # Siege Machines on a stronghold
+            finish_conquest()
+            await select(*siege)
+            require(await click_button("#game-actions", "Play Siege Machines"),
+                    f"Siege Machines is offered against {meta['territories'][siege[1]]['name']}")
+            invasion = state_now()["printed"]["invasion"] or {}
+            check(invasion.get("noStronghold") is True, "the stronghold gives no defence bonus")
+            await select(*siege)
+            check(await click_button("#game-actions", "1 die"), "the stronghold can be attacked")
+
+            # Black Sails on a sea-line
+            finish_conquest()
+            await select(*sea)
+            require(await click_button("#game-actions", "Play Black Sails"), "Black Sails is offered over the sea-line")
+            invasion = state_now()["printed"]["invasion"] or {}
+            check(invasion.get("bonus") == 1, "the seaborne invasion gets +1 on its highest die")
+            await select(*sea)
+            check(await click_button("#game-actions", "1 die"), "the sea-line can be crossed")
+
             # The Way Is Under the Mountains
+            finish_conquest()
             st = state_now()
-            if st["phase"] == "conquest_move":
-                act(base, session, csrf, game_id, "move_in", **{
-                    "from": st["pending"]["from"], "to": st["pending"]["to"], "count": st["pending"]["min"]})
-                st = state_now()
             pick = next(((a, b) for r in meta["mountains"] for a in r["territories"] for b in r["territories"]
                          if st["territories"][a]["owner"] == me and st["territories"][a]["armies"] >= 2 and
                          st["territories"][b]["owner"] == 1 - me and
@@ -268,14 +317,29 @@ async def run(chrome_bin, websockets):
             check(await click_button("#game-actions", "1 die"), "and can be attacked")
 
             # Move by Night
-            st = state_now()
-            if st["phase"] == "conquest_move":
-                act(base, session, csrf, game_id, "move_in", **{
-                    "from": st["pending"]["from"], "to": st["pending"]["to"], "count": st["pending"]["min"]})
+            finish_conquest()
             act(base, session, csrf, game_id, "done_attack")
             await asyncio.sleep(1.5)
             require(await tile_button("p07"), "Move by Night has a Play button when fortifying")
             check(state_now()["flags"]["extraFortify"] == 3, "Move by Night gives 3 extra redeployments")
+
+            # Ending the turn draws Appoint a Second Leader (a Leader took a site)
+            require(await click_button("#game-actions", "End turn"), "the turn can be ended")
+            st = state_now()
+            require((st.get("legal") or {}).get("freeLeaderPending"),
+                    "Appoint a Second Leader waits for a territory" +
+                    ("" if (st.get("legal") or {}).get("freeLeaderPending")
+                     else ": " + " | ".join(e["text"] for e in st["log"][-5:])))
+            hint = await page.js("document.getElementById('game-actions').textContent")
+            check("Appoint a Second Leader" in hint, "the action panel asks where the new Leader goes")
+            spot = st["legal"]["leaderPlaceable"][0]
+            await click_territory(spot)
+            st = state_now()
+            check(st["territories"][spot]["leader"] == me + 1 and st["players"][me]["leaders"] == 2,
+                  "the second Leader is on the board")
+            if st["current"] == me:
+                await click_button("#game-actions", "End turn")
+            check(state_now()["current"] != me, "the turn passes after the event")
     finally:
         if chrome is not None:
             chrome.terminate()
